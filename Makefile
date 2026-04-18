@@ -5,6 +5,7 @@ BUILD_DIR  ?= build
 CACHE_FILE  = $(BUILD_DIR)/CMakeCache.txt
 CMAKE_ARGS  = -DCMAKE_PREFIX_PATH=$(CONDA_PREFIX) \
               -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
               -GNinja
 
 .PHONY: all configure clean

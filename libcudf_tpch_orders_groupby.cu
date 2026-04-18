@@ -29,8 +29,10 @@
 #include <typeinfo>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "rmm_backtrace_resource_adaptor.hpp"
@@ -346,36 +348,67 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-int main(int argc, char** argv)
-{
-    // Options:
-    //   --input <path>   Parquet file to read (default: use inline Arrow data)
-    //   --rmm-trace      Print a demangled CPU call stack for every RMM alloc/dealloc
-    //                    Also enabled by setting RMM_INSTRUMENT=1 in the environment.
-    bool        trace    = static_cast<bool>(std::getenv("RMM_INSTRUMENT"));
-    std::string parquet_path;
+// Parsed command-line arguments
+// ---------------------------------------------------------------------------
+struct Args {
+    std::string input;       // --input / -i  path to Parquet file (empty → inline Arrow)
+    bool        rmm_trace;   // --rmm-trace   enable RMM allocation tracing
+};
 
-    for (int i = 1; i < argc; ++i) {
-        std::string arg(argv[i]);
+static Args parse_args(int argc, char** argv)
+{
+    Args args{};
+    std::span<char* const> remaining(argv + 1, argc - 1);
+
+    auto usage = [&]() {
+        std::cerr << "Usage: " << argv[0] << " [--input <parquet>] [--rmm-trace]\n";
+    };
+
+    while (!remaining.empty()) {
+        std::string_view arg = remaining.front();
+        remaining = remaining.subspan(1);
+
         if (arg == "--rmm-trace") {
-            trace = true;
-        } else if ((arg == "--input" || arg == "-i") && i + 1 < argc) {
-            parquet_path = argv[++i];
+            args.rmm_trace = true;
+        } else if (arg == "--input" || arg == "-i") {
+            if (remaining.empty()) {
+                std::cerr << arg << " requires a value\n";
+                usage();
+                std::exit(1);
+            }
+            args.input = remaining.front();
+            remaining = remaining.subspan(1);
         } else {
-            std::cerr << "Unknown argument: " << arg << "\n"
-                      << "Usage: " << argv[0]
-                      << " [--input <parquet>] [--rmm-trace]\n";
-            return 1;
+            std::cerr << "Unknown argument: " << arg << "\n";
+            usage();
+            std::exit(1);
         }
     }
 
+    return args;
+}
+
+// ---------------------------------------------------------------------------
+int main(int argc, char** argv)
+{
+    auto const args = parse_args(argc, argv);
+
+    // --rmm-trace can also be enabled via environment variable, e.g. when
+    // running under nsys/ncu without modifying the profiler command line.
+    bool const trace = args.rmm_trace || static_cast<bool>(std::getenv("RMM_INSTRUMENT"));
+
+    // setup memory instrumentation
     RmmInstrumentationGuard rmm_guard{trace};
 
-    TableSource src = !parquet_path.empty()
-        ? from_parquet(parquet_path)
+    // Get the input data
+    TableSource src = !args.input.empty()
+        ? from_parquet(args.input)
         : from_inline_arrow();
 
+    // run the group by
     run_groupby_sum(src);
+
     return 0;
 }
+
 

@@ -1,0 +1,17 @@
+name: libcudf-tutorial
+channels:
+  - rapidsai
+  - conda-forge
+  - nvidia
+dependencies:
+  - cudf=26.02
+  - libcudf=26.02
+  - rmm=26.02
+  - arrow-cpp
+  - cmake
+  - make
+  - cxx-compiler
+  - cuda-version=13.0
+  - pip
+  - pip:
+      - pyarrow

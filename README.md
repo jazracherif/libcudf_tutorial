@@ -38,12 +38,16 @@ Demonstrates creating an Arrow-backed table in C++ with libcudf and running a `g
 ### 1.1 Create the conda environment (first time only)
 
 ```bash
-conda create -n libcudf-tutorial -c rapidsai -c conda-forge -c nvidia \
-    cudf=26.02 libcudf=26.02 rmm=26.02 arrow-cpp cmake make cxx-compiler \
-    cuda-version=13.0
+conda env create -f environment.yml
 ```
 
-> Adjust `cudf` and `cuda-version` to match your installed CUDA toolkit.
+To update an existing environment:
+
+```bash
+conda env update -f environment.yml --prune
+```
+
+> Adjust `cudf` and `cuda-version` in `environment.yml` to match your installed CUDA toolkit.
 
 ## 2. Build
 
@@ -58,11 +62,8 @@ cudf, Arrow and RMM automatically, then compiles the binary into `build/`.
 ## 3. Generate sample data
 
 `make_tpch_orders.py` creates a typed Parquet (or Arrow IPC) file under `data/`
-that can be used as input to `libcudf_tpch_orders_groupby`.  It requires `pyarrow`:
-
-```bash
-pip install pyarrow
-```
+that can be used as input to `libcudf_tpch_orders_groupby`.  It requires `pyarrow`,
+which is included in the `environment.yml` conda environment.
 
 ### 3.1 Basic usage (10 rows → `data/orders.parquet`)
 
