@@ -1,0 +1,87 @@
+(libcudf-tutorial) jazracherif@spark-d5e1:~/code/nvidia/libcudf_tutorial$ nsys stats --report nvtx_pushpop_sum reports/libcudf_groupby.nsys-rep
+Generating SQLite file reports/libcudf_groupby.sqlite from reports/libcudf_groupby.nsys-rep
+Processing [reports/libcudf_groupby.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-armv8/reports/nvtx_pushpop_sum.py]... 
+
+ ** NVTX Push/Pop Range Summary (nvtx_pushpop_sum):
+
+ Time (%)  Total Time (ns)  Instances    Avg (ns)       Med (ns)      Min (ns)     Max (ns)    StdDev (ns)                                                 Range                                                
+ --------  ---------------  ---------  -------------  -------------  -----------  -----------  -----------  ----------------------------------------------------------------------------------------------------
+     33.3      661,557,680          1  661,557,680.0  661,557,680.0  661,557,680  661,557,680          0.0  libcudf:read_parquet                                                                                
+     30.5      606,777,456          1  606,777,456.0  606,777,456.0  606,777,456  606,777,456          0.0  libkvikio:kvikio::CompatModeManager::CompatModeManager(const std::string&, const std::string&, mode…
+     30.5      606,309,136          1  606,309,136.0  606,309,136.0  606,309,136  606,309,136          0.0  libkvikio:std::optional<CUfileError> kvikio::CUFileHandleWrapper::register_handle(int)              
+      0.8       16,098,672          1   16,098,672.0   16,098,672.0   16,098,672   16,098,672          0.0  libcudf:aggregate                                                                                   
+      0.4        7,330,416          1    7,330,416.0    7,330,416.0    7,330,416    7,330,416          0.0  libcudf:decode_page_headers                                                                         
+      0.3        6,497,344          1    6,497,344.0    6,497,344.0    6,497,344    6,497,344          0.0  libcudf:read_chunk_internal                                                                         
+      0.3        6,028,704          1    6,028,704.0    6,028,704.0    6,028,704    6,028,704          0.0  libcudf:decompress_page_data                                                                        
+      0.3        6,022,112          4    1,505,528.0      151,688.0      120,496    5,598,240  2,728,516.3  CCCL:thrust::exclusive_scan                                                                         
+      0.3        5,690,784          1    5,690,784.0    5,690,784.0    5,690,784    5,690,784          0.0  libcudf:decode_page_data                                                                            
+      0.3        5,548,528          1    5,548,528.0    5,548,528.0    5,548,528    5,548,528          0.0  libcudf:decompress                                                                                  
+      0.2        4,143,536          1    4,143,536.0    4,143,536.0    4,143,536    4,143,536          0.0  libcudf:sort_pages                                                                                  
+      0.2        3,987,664          4      996,916.0       84,136.0       20,192    3,799,200  1,869,144.8  libkvikio:std::future<long unsigned int> kvikio::FileHandle::pread(void*, std::size_t, std::size_t,…
+      0.2        3,827,792          2    1,913,896.0    1,913,896.0    1,092,256    2,735,536  1,161,974.4  CCCL:thrust::sequence                                                                               
+      0.2        3,817,104          2    1,908,552.0    1,908,552.0    1,090,048    2,727,056  1,157,539.5  CCCL:thrust::tabulate                                                                               
+      0.2        3,780,416          1    3,780,416.0    3,780,416.0    3,780,416    3,780,416          0.0  libkvikio:std::size_t kvikio::detail::posix_device_read(int, const void*, std::size_t, std::size_t,…
+      0.2        3,709,744          1    3,709,744.0    3,709,744.0    3,709,744    3,709,744          0.0  libcudf:build_string_dict_indices                                                                   
+      0.2        3,551,856          3    1,183,952.0       30,160.0       15,600    3,506,096  2,011,048.9  CCCL:cub::DeviceFor::Bulk                                                                           
+      0.2        3,447,200          1    3,447,200.0    3,447,200.0    3,447,200    3,447,200          0.0  libkvikio:kvikio::BounceBufferPool<Allocator>::Buffer kvikio::BounceBufferPool<Allocator>::get() [w…
+      0.2        3,147,440          1    3,147,440.0    3,147,440.0    3,147,440    3,147,440          0.0  libcudf:device_decompress                                                                           
+      0.2        3,008,320          1    3,008,320.0    3,008,320.0    3,008,320    3,008,320          0.0  libcudf:preprocess_subpass_pages                                                                    
+      0.1        2,448,128          1    2,448,128.0    2,448,128.0    2,448,128    2,448,128          0.0  libcudf:detect_malformed_pages                                                                      
+      0.1        2,187,072          1    2,187,072.0    2,187,072.0    2,187,072    2,187,072          0.0  CCCL:thrust::transform_exclusive_scan                                                               
+      0.1        2,177,152          5      435,430.4       11,664.0       11,184    1,667,792    717,545.1  CCCL:cub::DeviceFor::ForEachN                                                                       
+      0.1        2,127,184          3      709,061.3       25,056.0       22,640    2,079,488  1,186,824.9  CCCL:cub::DeviceReduce::ReduceByKey                                                                 
+      0.1        2,013,024          1    2,013,024.0    2,013,024.0    2,013,024    2,013,024          0.0  libcudf:sort_tasks                                                                                  
+      0.1        1,986,848          4      496,712.0      354,880.0      124,304    1,152,784    478,088.9  CCCL:cub::DeviceReduce::Reduce                                                                      
+      0.1        1,706,560          4      426,640.0       12,744.0       12,032    1,669,040    828,266.9  CCCL:thrust::for_each                                                                               
+      0.1        1,212,848          1    1,212,848.0    1,212,848.0    1,212,848    1,212,848          0.0  CCCL:thrust::stable_sort_by_key                                                                     
+      0.1        1,145,008          4      286,252.0       22,008.0       10,752    1,090,240    536,086.9  CCCL:cub::DeviceReduce::TransformReduce                                                             
+      0.1        1,063,280          1    1,063,280.0    1,063,280.0    1,063,280    1,063,280          0.0  CCCL:cub::DeviceRadixSort                                                                           
+      0.1        1,032,560          7      147,508.6       15,504.0       13,328      940,544    349,698.6  CCCL:thrust::transform                                                                              
+      0.1        1,007,328          2      503,664.0      503,664.0       17,168      990,160    688,009.2  CCCL:thrust::fill                                                                                   
+      0.0          720,256          1      720,256.0      720,256.0      720,256      720,256          0.0  CCCL:thrust::sort                                                                                   
+      0.0          610,896          2      305,448.0      305,448.0       35,648      575,248    381,554.8  CCCL:thrust::scatter                                                                                
+      0.0          476,240          1      476,240.0      476,240.0      476,240      476,240          0.0  CCCL:thrust::for_each_n                                                                             
+      0.0          449,184          1      449,184.0      449,184.0      449,184      449,184          0.0  libcudf:allocate_columns                                                                            
+      0.0          392,160          1      392,160.0      392,160.0      392,160      392,160          0.0  libcudf:batched_memset                                                                              
+      0.0          195,968          2       97,984.0       97,984.0       45,888      150,080     73,674.9  CCCL:thrust::exclusive_scan_by_key                                                                  
+      0.0          145,632          1      145,632.0      145,632.0      145,632      145,632          0.0  libkvikio:static CUstream_st* kvikio::detail::StreamsByThread::get()                                
+      0.0          141,600          1      141,600.0      141,600.0      141,600      141,600          0.0  libkvikio:static CUstream_st* kvikio::detail::StreamsByThread::get(CUcontext, std::thread::id)      
+      0.0          104,976          2       52,488.0       52,488.0       28,656       76,320     33,703.5  CCCL:thrust::gather                                                                                 
+      0.0           51,568          2       25,784.0       25,784.0       22,608       28,960      4,491.5  CCCL:cub::DeviceSelect::If                                                                          
+      0.0           45,696          1       45,696.0       45,696.0       45,696       45,696          0.0  CCCL:cub::DeviceMemcpy::Batched                                                                     
+      0.0           44,688          2       22,344.0       22,344.0       12,592       32,096     13,791.4  CCCL:uninitialized_fill                                                                             
+      0.0           33,872          1       33,872.0       33,872.0       33,872       33,872          0.0  CCCL:cub::DeviceCopy::Batched                                                                       
+      0.0           33,120          2       16,560.0       16,560.0        1,296       31,824     21,586.6  libkvikio:kvikio::FileHandle::~FileHandle()                                                         
+      0.0           31,648          2       15,824.0       15,824.0          288       31,360     21,971.2  libkvikio:void kvikio::FileHandle::close()                                                          
+      0.0           28,208          4        7,052.0          184.0           48       27,792     13,826.8  libkvikio:void kvikio::CUFileHandleWrapper::unregister_handle()                                     
+      0.0           17,632          1       17,632.0       17,632.0       17,632       17,632          0.0  CCCL:thrust::transform_if                                                                           
+      0.0           15,392          3        5,130.7        1,440.0        1,280       12,672      6,531.5  libkvikio:task                                                                                      
+      0.0           10,048          3        3,349.3        1,296.0        1,072        7,680      3,752.1  libkvikio:std::size_t kvikio::detail::posix_host_read(int, void*, std::size_t, std::size_t, int) [w…
+      0.0            8,864          2        4,432.0        4,432.0        3,504        5,360      1,312.4  libcudf:make_numeric_column                                                                         
+      0.0            7,824          1        7,824.0        7,824.0        7,824        7,824          0.0  libcudf:finalize_output                                                                             
+      0.0            7,456          1        7,456.0        7,456.0        7,456        7,456          0.0  libcudf:make_fixed_width_column                                                                     
+      0.0            6,736          2        3,368.0        3,368.0        1,968        4,768      1,979.9  libkvikio:void kvikio::FileWrapper::open(const std::string&, const std::string&, bool, mode_t)      
+      0.0            6,064          1        6,064.0        6,064.0        6,064        6,064          0.0  libkvikio:kvikio::defaults::defaults()                                                              
+      0.0            5,280          2        2,640.0        2,640.0        1,696        3,584      1,335.0  libkvikio:int kvikio::open_fd(const std::string&, const std::string&, bool, mode_t)                 
+      0.0            4,832          1        4,832.0        4,832.0        4,832        4,832          0.0  libkvikio:static unsigned int kvikio::defaults::get_num_threads_from_env()                          
+      0.0            3,600          1        3,600.0        3,600.0        3,600        3,600          0.0  libcudf:create_null_mask                                                                            
+      0.0            3,568          6          594.7          448.0          240        1,536        471.4  libkvikio:kvikio::FileWrapper::~FileWrapper()                                                       
+      0.0            3,376          8          422.0          160.0           48        1,760        601.8  libkvikio:void kvikio::FileWrapper::close()                                                         
+      0.0            2,928          1        2,928.0        2,928.0        2,928        2,928          0.0  libkvikio:std::size_t kvikio::get_file_size(int)                                                    
+      0.0            2,592          5          518.4          320.0           80        1,232        487.0  libcudf:mutable_view                                                                                
+      0.0            2,384          1        2,384.0        2,384.0        2,384        2,384          0.0  libkvikio:kvikio::FileHandle::FileHandle(const std::string&, const std::string&, mode_t, kvikio::Co…
+      0.0            2,368          3          789.3          144.0          112        2,112      1,145.6  libcudf:make_strings_column                                                                         
+      0.0            2,064          3          688.0          304.0           96        1,664        851.6  libkvikio:T kvikio::getenv_or(std::string_view, T) [with T = bool; std::string_view = std::basic_st…
+      0.0            2,064          1        2,064.0        2,064.0        2,064        2,064          0.0  libkvikio:kvikio::BounceBufferPool<Allocator>::Buffer::~Buffer() [with Allocator = kvikio::CudaPinn…
+      0.0              976          1          976.0          976.0          976          976          0.0  libkvikio:static kvikio::BounceBufferPool<Allocator>& kvikio::BounceBufferPool<Allocator>::instance…
+      0.0              960          1          960.0          960.0          960          960          0.0  libkvikio:void kvikio::BounceBufferPool<Allocator>::put(void*, std::size_t) [with Allocator = kviki…
+      0.0              720          2          360.0          360.0          272          448        124.5  libkvikio:T kvikio::getenv_or(std::string_view, T) [with T = CompatMode; std::string_view = std::ba…
+      0.0              688          1          688.0          688.0          688          688          0.0  libkvikio:kvikio::ThreadPool* kvikio::{anonymous}::get_thread_pool_per_block_device(const std::stri…
+      0.0              432          2          216.0          216.0          176          256         56.6  libkvikio:void* kvikio::BounceBufferPool<Allocator>::Buffer::get() [with Allocator = kvikio::CudaPi…
+      0.0              384          1          384.0          384.0          384          384          0.0  libcudf:enforce_null_consistency                                                                    
+      0.0              384          2          192.0          192.0          176          208         22.6  libkvikio:void kvikio::BounceBufferPool<Allocator>::_ensure_buffer_size() [with Allocator = kvikio:…
+      0.0              352          1          352.0          352.0          352          352          0.0  libcudf:compute_output_chunks_for_subpass                                                           
+      0.0              272          1          272.0          272.0          272          272          0.0  libcudf:split_tasks                                                                                 
+      0.0              176          1          176.0          176.0          176          176          0.0  libcudf:host_decompress                                                                             
+      0.0              176          2           88.0           88.0           80           96         11.3  libkvikio:int kvikio::open_fd_parse_flags(const std::string&, bool)                                 
+      0.0              128          1          128.0          128.0          128          128          0.0  libkvikio:T kvikio::getenv_or(std::string_view, T) [with T = std::vector<int>; std::string_view = s…
