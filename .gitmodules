@@ -1,0 +1,16 @@
+[submodule "cccl"]
+	path = cccl
+	url = git@github.com:jazracherif/cccl.git
+	branch = v26.02.00_analysis
+[submodule "cuCollections"]
+	path = cuCollections
+	url = git@github.com:jazracherif/cuCollections.git
+	branch = v26.02.00_analysis
+[submodule "cudf"]
+	path = cudf
+	url = git@github.com:jazracherif/cudf.git
+	branch = v26.02.00_analysis
+[submodule "rmm"]
+	path = rmm
+	url = git@github.com:jazracherif/rmm.git
+	branch = v26.02.00_analysis
