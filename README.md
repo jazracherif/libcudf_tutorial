@@ -61,14 +61,14 @@ cudf, Arrow and RMM automatically, then compiles the binary into `build/`.
 
 ## 3. Generate sample data
 
-`make_tpch_orders.py` creates a typed Parquet (or Arrow IPC) file under `data/`
+`scripts/make_tpch_orders.py` creates a typed Parquet (or Arrow IPC) file under `data/`
 that can be used as input to `libcudf_tpch_orders_groupby`.  It requires `pyarrow`,
 which is included in the `environment.yml` conda environment.
 
 ### 3.1 Basic usage (10 rows → `data/orders.parquet`)
 
 ```bash
-python make_tpch_orders.py
+python scripts/make_tpch_orders.py
 ```
 
 ### 3.2 Options
@@ -82,7 +82,7 @@ python make_tpch_orders.py
 Example — generate 1000 rows into a custom file:
 
 ```bash
-python make_tpch_orders.py --rows 1000 --output my_orders.parquet
+python scripts/make_tpch_orders.py --rows 1000 --output my_orders.parquet
 ```
 
 The generated table matches the [TPC-H Orders](https://www.tpc.org/tpch/) schema.
@@ -422,11 +422,12 @@ make clean
 
 | File | Description |
 |------|-------------|
-| `libcudf_tpch_orders_groupby.cu` | Main C++/CUDA source |
-| `rmm_backtrace_resource_adaptor.hpp` | Custom RMM MR adaptor that prints a demangled call stack on every alloc/dealloc |
+| `src/libcudf_tpch_orders_groupby.cu` | Main C++/CUDA source |
+| `include/rmm_backtrace_resource_adaptor.hpp` | Custom RMM MR adaptor that prints a demangled call stack on every alloc/dealloc |
+| `scripts/make_tpch_orders.py` | Python script to generate TPC-H Orders Parquet/IPC data |
 | `CMakeLists.txt`      | CMake build definition |
 | `Makefile`            | Thin wrapper around CMake |
-| `make_tpch_orders.py` | Python script to generate TPC-H Orders Parquet/IPC data |
+| `environment.yml`     | Conda environment definition |
 | `docs/` | Technical deep-dives on adaptor internals (see below) |
 
 ## 9. Internals and Documentation

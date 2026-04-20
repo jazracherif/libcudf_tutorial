@@ -39,3 +39,6 @@ __pycache__/
 *.pyo
 .env
 .venv/
+
+
+cufile.log

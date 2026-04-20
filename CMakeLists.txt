@@ -18,7 +18,9 @@ find_package(cudf REQUIRED)
 find_package(Arrow REQUIRED)
 
 # ---- executable ----
-add_executable(libcudf_tpch_orders_groupby libcudf_tpch_orders_groupby.cu)
+add_executable(libcudf_tpch_orders_groupby src/libcudf_tpch_orders_groupby.cu)
+
+target_include_directories(libcudf_tpch_orders_groupby PRIVATE include)
 
 target_link_libraries(libcudf_tpch_orders_groupby
     PRIVATE

@@ -33,7 +33,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pandas as pd
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 # Fixed pools used for low-cardinality columns in the TPC-H Orders example.
 _ORDER_STATUSES   = np.array(["F", "O", "P"], dtype=object)
@@ -56,31 +56,30 @@ SCHEMA = pa.schema([
 
 
 def make_batch(start: int, size: int) -> pa.RecordBatch:
-    """Return one Arrow RecordBatch covering rows [start, start+size)."""
+    """Build one Arrow RecordBatch covering rows [start, start + size).
+
+    All column values are deterministically derived from the row index so that
+    batches can be generated independently (useful for parallel or resumable
+    writes) and still produce consistent data across runs.
+
+    Args:
+        start: 0-based index of the first row in this batch.
+        size:  Number of rows to generate.
+
+    Returns:
+        An Arrow RecordBatch with shape (size, 9) conforming to SCHEMA.
+    """
     idx = np.arange(start, start + size, dtype=np.int64)
 
-    # o_orderkey: sequential, 1-based
-    orderkeys     = pa.array((idx + 1),                               type=pa.int64())
-    # o_custkey: synthetic FK, cycles through 150 000 customers (TPC-H SF=1 has 150k)
-    custkeys      = pa.array((idx % 150_000 + 1),                     type=pa.int64())
-    # o_orderstatus: 'F', 'O', or 'P' in round-robin
-    statuses      = pa.array(_ORDER_STATUSES[idx % 3],                type=pa.utf8())
-    # o_totalprice: synthetic value in [1.00, 500 000.00]
-    total_prices  = pa.array(
-        np.round((idx % 499_999 + 1).astype(np.float64) + 0.99, 2),  type=pa.float64())
-    # o_orderdate: one order per hour starting from the base date
-    order_dates   = pa.array(
-        ((_BASE_TS_MS + idx * 3_600_000) // 86_400_000).astype(np.int32), type=pa.date32())
-    # o_orderpriority: cycles through 5 priority levels
-    priorities    = pa.array(_ORDER_PRIORITIES[idx % 5],             type=pa.utf8())
-    # o_clerk: formatted as 'Clerk#XXXXXXXXX', cycles through 1 000 clerks
-    clerk_ids     = pa.array(
-        [f"Clerk#{(i % 1_000) + 1:09d}" for i in idx.tolist()],      type=pa.utf8())
-    # o_shippriority: always 0 in standard TPC-H
-    ship_priority = pa.array(np.zeros(size, dtype=np.int32),          type=pa.int32())
-    # o_comment: short synthetic comment referencing order key
-    comments      = pa.array(
-        [f"order {k} placed" for k in (idx + 1).tolist()],           type=pa.utf8())
+    orderkeys     = pa.array((idx + 1), type=pa.int64())   # sequential, 1-based
+    custkeys      = pa.array((idx % 150_000 + 1), type=pa.int64())   # synthetic FK, cycles through 150k customers (TPC-H SF=1)
+    statuses      = pa.array(_ORDER_STATUSES[idx % 3], type=pa.utf8())    # 'F', 'O', or 'P' in round-robin
+    total_prices  = pa.array(np.round((idx % 499_999 + 1).astype(np.float64) + 0.99, 2), type=pa.float64())  # synthetic value in [1.00, 500_000.00]
+    order_dates   = pa.array(((_BASE_TS_MS + idx * 3_600_000) // 86_400_000).astype(np.int32), type=pa.date32())  # synthetic value in [1.00, 500_000.00]
+    priorities    = pa.array(_ORDER_PRIORITIES[idx % 5], type=pa.utf8())    # cycles through 5 priority levels
+    clerk_ids     = pa.array([f"Clerk#{(i % 1_000) + 1:09d}" for i in idx.tolist()], type=pa.utf8())  # synthetic value in [1.00, 500_000.00]
+    ship_priority = pa.array(np.zeros(size, dtype=np.int32), type=pa.int32())   # always 0 in standard TPC-H
+    comments      = pa.array([f"order {k} placed" for k in (idx + 1).tolist()], type=pa.utf8()) # short synthetic comment referencing order key
 
     return pa.record_batch(
         [orderkeys, custkeys, statuses, total_prices, order_dates,
@@ -90,7 +89,17 @@ def make_batch(start: int, size: int) -> pa.RecordBatch:
 
 
 def write_parquet(path: str, n_rows: int, batch_size: int) -> None:
-    """Write n_rows to a Parquet file in fixed-size batches."""
+    """Write n_rows of TPC-H Orders data to a Parquet file.
+
+    Rows are generated and flushed in chunks of `batch_size` so that peak
+    memory usage is O(batch_size) rather than O(n_rows).  Progress is printed
+    to stdout for runs larger than 10 million rows.
+
+    Args:
+        path:       Absolute or relative path of the output .parquet file.
+        n_rows:     Total number of rows to write.
+        batch_size: Rows per in-memory batch (controls peak RAM usage).
+    """
     with pq.ParquetWriter(path, SCHEMA) as writer:
         written = 0
         while written < n_rows:
@@ -106,7 +115,17 @@ def write_parquet(path: str, n_rows: int, batch_size: int) -> None:
 
 
 def write_ipc(path: str, n_rows: int, batch_size: int) -> None:
-    """Write n_rows to an Arrow IPC (Feather v2) file in batches."""
+    """Write n_rows of TPC-H Orders data to an Arrow IPC (Feather v2) file.
+
+    Arrow IPC / Feather v2 is a zero-copy columnar format that can be
+    memory-mapped directly, making it faster to read than Parquet for
+    repeated local access.  Use Parquet for portability and compression.
+
+    Args:
+        path:       Absolute or relative path of the output .ipc file.
+        n_rows:     Total number of rows to write.
+        batch_size: Rows per in-memory batch (controls peak RAM usage).
+    """
     import pyarrow.ipc as ipc
     with ipc.new_file(path, SCHEMA) as writer:
         written = 0
@@ -140,8 +159,17 @@ if __name__ == "__main__":
                         help="Number of rows to preview (0 = skip preview)")
     args = parser.parse_args()
 
+    # --output must be a plain filename, not a path — output dir is always data/
+    if os.path.basename(args.output) != args.output or args.output in (".", ".."):
+        parser.error(f"--output must be a filename, not a path (got: {args.output!r}). "
+                     f"Files are always written to {DATA_DIR}/")
+
     os.makedirs(DATA_DIR, exist_ok=True)
-    out_path = os.path.join(DATA_DIR, args.output)
+
+    # Ensure the output filename carries the correct extension for the chosen format.
+    expected_ext = ".parquet" if args.format == "parquet" else ".ipc"
+    output = args.output if args.output.endswith(expected_ext) else args.output + expected_ext
+    out_path = os.path.join(DATA_DIR, output)
 
     print("Schema:")
     print(SCHEMA)
