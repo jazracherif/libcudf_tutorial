@@ -5,6 +5,7 @@ Demonstrates creating an Arrow-backed table in C++ with libcudf and running a `g
 ## Table of Contents
 
 - [1. Prerequisites](#1-prerequisites)
+  - [1.0 Clone the repository](#10-clone-the-repository)
   - [1.1 Create the conda environment (first time only)](#11-create-the-conda-environment-first-time-only)
 - [2. Build](#2-build)
 - [3. Generate sample data](#3-generate-sample-data)
@@ -34,6 +35,18 @@ Demonstrates creating an Arrow-backed table in C++ with libcudf and running a `g
 - NVIDIA GPU with CUDA drivers installed
 - [Miniconda or Anaconda](https://docs.conda.io/en/latest/miniconda.html)
 - A `libcudf-tutorial` conda environment with the Rapids stack
+
+### 1.0 Clone the repository
+
+Use the following command for faster cloning that includes the submodules and explore the code analysis.
+
+`--recurse-submodules` initializes and clones `cccl/`, `cuCollections/`, and `cudf/` in one step.
+`--shallow-submodules` fetches only the single commit each submodule is pinned to (`--depth 1`),
+skipping their full git history and reducing the download from several GB to a few hundred MB.
+
+```bash
+git clone --recurse-submodules --shallow-submodules git@github.com:jazracherif/libcudf_tutorial.git
+```
 
 ### 1.1 Create the conda environment (first time only)
 
