@@ -5,8 +5,8 @@ _Generated from `docs/groupby/logs/libcudf_groupby_orders_100M_libcudf_aggregate
 ```mermaid
 %%{init: {'sequence': {'actorMargin': 300, 'width': 200}}}%%
 sequenceDiagram
-    participant H as Host
-    participant D as Device
+    participant H as Host (CPU)
+    participant D as Device (GPU)
     Note over H: cudaStreamSynchronize (5.408 μs)
     H->>D: cudaMalloc (279.056 μs, 143 B)
     H-->>D: cudaMemcpyAsync (16.912 μs)

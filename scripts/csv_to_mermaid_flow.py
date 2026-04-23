@@ -362,8 +362,8 @@ def main() -> None:
         f.write("```mermaid\n")
         f.write("%%{init: {'sequence': {'actorMargin': 300, 'width': 200}}}%%\n")
         f.write("sequenceDiagram\n")
-        f.write("    participant H as Host\n")
-        f.write("    participant D as Device\n")
+        f.write("    participant H as Host (CPU)\n")
+        f.write("    participant D as Device (GPU)\n")
         for line in mermaid_lines:
             f.write(line + "\n")
         f.write("```\n")

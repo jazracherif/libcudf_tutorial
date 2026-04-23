@@ -46,7 +46,7 @@ The central challenge on GPU is **reducing global atomic contention** for the ag
 
 ## Scope of This Analysis
 
-This document analyses the **`groupby` + `sum` physical operator in NVIDIA's [libcudf](https://github.com/rapidsai/cudf)** — the GPU dataframe library that underpins the RAPIDS ecosystem and is used by cuDF (Python), Spark-RAPIDS, and Dask-cuDF, among others.
+This document analyses the **`groupby` + `sum` physical operator in NVIDIA's [libcudf](https://github.com/rapidsai/cudf)** — the GPU dataframe library that underpins the RAPIDS ecosystem and is used by cuDF (Python), Spark-RAPIDS, and Dask-cuDF, among others. The analysis is grounded in a **100 million row workload** (1.8 GB Parquet file) run on a real GPU.
 
 Specifically we trace the exact execution path triggered by the following query:
 
@@ -130,6 +130,23 @@ RMM_INSTRUMENT=1 nsys profile \
     --output reports/libcudf_groupby_100M \
     --force-overwrite true \
     ./build/libcudf_tpch_orders_groupby --input data/orders_100M.parquet
+```
+
+**6. Extract CUDA events from the Nsight report to CSV:**
+
+```bash
+python scripts/extract_nsys_events.py \
+    reports/libcudf_groupby_100M.nsys-rep \
+    docs/groupby/logs/libcudf_groupby_orders_100M_libcudf_aggregate.csv \
+    --nvtx-label "libcudf:aggregate"
+```
+
+**7. Generate the Host↔Device message flow diagram:**
+
+```bash
+python scripts/csv_to_mermaid_flow.py \
+    docs/groupby/logs/libcudf_groupby_orders_100M_libcudf_aggregate.csv \
+    docs/groupby/logs/nsight_100m_aggregate_flow.md
 ```
 
 ### Libraries under analysis
