@@ -26,6 +26,8 @@ Demonstrates creating an Arrow-backed table in C++ with libcudf and running a `g
   - [6.3 Print a quick summary to stdout (no GUI needed)](#63-print-a-quick-summary-to-stdout-no-gui-needed)
   - [6.4 Source file and line info in backtraces](#64-source-file-and-line-info-in-backtraces)
   - [6.5 Notes](#65-notes)
+  - [6.6 Extract events from a report to CSV](#66-extract-events-from-a-report-to-csv)
+  - [6.7 Generate a Host↔Device message flow diagram](#67-generate-a-hostdevice-message-flow-diagram)
 - [7. Clean](#7-clean)
 - [8. Files](#8-files)
 - [9. Internals and Documentation](#9-internals-and-documentation)
@@ -425,6 +427,132 @@ In `nsys-ui`:
 - Use Nsight Systems first to find which kernels take the most time, then drill into them with `ncu`.
 - The `.nsys-rep` file can be opened on any machine with the Nsight Systems GUI installed (no GPU required for viewing).
 
+### 6.6 Extract events from a report to CSV
+
+`scripts/extract_nsys_events.py` converts a `.nsys-rep` report into a
+time-ordered CSV scoped to a named NVTX region.  It exports the report to
+SQLite via `nsys export` and then queries the CUPTI activity tables directly.
+
+#### Basic usage
+
+```bash
+python scripts/extract_nsys_events.py reports/libcudf_groupby.nsys-rep
+```
+
+Scope to a specific NVTX label (default: `aggregate`):
+
+```bash
+python scripts/extract_nsys_events.py \
+    reports/libcudf_groupby.nsys-rep \
+    docs/groupby/logs/nsight_aggregate.csv \
+    --nvtx-label "libcudf:aggregate"
+```
+
+Scope to multiple NVTX labels at once (all events land in a single CSV; the
+`NVTXLabel` column identifies which region each row came from):
+
+```bash
+python scripts/extract_nsys_events.py \
+    reports/libcudf_groupby.nsys-rep \
+    docs/groupby/logs/nsight_multi.csv \
+    --nvtx-label "libcudf:aggregate" "libcudf:merge"
+```
+
+Extract all events in the report (ignore NVTX scoping):
+
+```bash
+python scripts/extract_nsys_events.py reports/libcudf_groupby.nsys-rep --all
+```
+
+Include memory allocation/deallocation rows in the output (suppressed by default;
+their `Bytes` values are always propagated to the matching CUDA API rows via `corrId`):
+
+```bash
+python scripts/extract_nsys_events.py reports/libcudf_groupby.nsys-rep \
+    --include-memory
+```
+
+Include 1-byte `__device__` global variable registrations (filtered by default):
+
+```bash
+python scripts/extract_nsys_events.py reports/libcudf_groupby.nsys-rep \
+    --include-device-static
+```
+
+#### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--nvtx-label LABEL [LABEL …]` | `libcudf:aggregate` | One or more NVTX push/pop region labels to scope the output. Each label's events appear in the same CSV with a `NVTXLabel` column. Tries the full label first, then the suffix after the last `:`. |
+| `--all` | off | Ignore NVTX scoping; extract every event in the report. |
+| `--include-memory` | off | Emit memory allocation/deallocation rows in the CSV. |
+| `--include-device-static` | off | Include `CUDA_MEMOPR_MEMORY_KIND_DEVICE_STATIC` events (1-byte `__device__` globals from libcudacxx CPOs). |
+| `--keep-sqlite` | off | Keep the intermediate `.sqlite` file (re-export is slow; the file is reused automatically on subsequent runs). |
+
+#### Output columns
+
+| Column | Description |
+|--------|-------------|
+| `Start_ns` | Event start time in nanoseconds (sort key) |
+| `NVTXLabel` | The NVTX region label this event was captured under (empty when `--all` is used) |
+| `Type` | `kernel`, `cuda api`, `memcpy`, `memset`, or `memory` |
+| `Namespace` | For kernel rows: the C++ namespace prefix (e.g. `cub::detail::scan`) |
+| `Name` | Kernel name or CUDA API name (version suffix stripped) |
+| `APIVersion` | Version suffix extracted from the CUDA API name (e.g. `v3020`, `v7000`) |
+| `ShortName` | Short / unqualified name as reported by Nsight |
+| `Start` | Human-readable start time (e.g. `1.720762256s`) |
+| `Duration` | Human-readable duration (e.g. `4.105 ms`) |
+| `Duration_ns` | Duration in nanoseconds |
+| `Bytes` | Bytes transferred or allocated; for `cuda api` rows this is propagated from the matching memory event via `corrId` |
+| `Grid` | Kernel grid dimensions (e.g. `390625,1,1`) |
+| `Block` | Kernel block dimensions (e.g. `256,1,1`) |
+| `Stream` | CUDA stream ID |
+| `Device` | GPU index (e.g. `GPU 0`) |
+| `TID` | Host thread ID (CUDA API rows only) |
+| `ExtraDetail` | Shared-memory sizes, registers per thread, `corrId`, etc. |
+| `FullName` | Full demangled kernel signature (kernel rows only) |
+
+### 6.7 Generate a Host↔Device message flow diagram
+
+`scripts/csv_to_mermaid_flow.py` reads a CSV produced by `extract_nsys_events.py`
+and writes a Markdown file containing a Mermaid `sequenceDiagram` that shows
+every event as an arrow between **Host** and **Device**.
+
+```bash
+python scripts/csv_to_mermaid_flow.py \
+    docs/groupby/logs/nsight_100m_aggregate.csv \
+    docs/groupby/logs/nsight_100m_aggregate_flow.md
+```
+
+Limit to the first 50 events and only show kernels + memcpy:
+
+```bash
+python scripts/csv_to_mermaid_flow.py nsight.csv flow.md \
+    --max-rows 50 --types kernel memcpy
+```
+
+#### Arrow conventions
+
+| Arrow | Style | Meaning |
+|-------|-------|---------|
+| `H->>D` | solid | Blocking host→device call (`cudaMalloc`, `cudaFree`, actual `Memcpy`) |
+| `H-->>D` | dashed | Async host→device call (`cudaLaunchKernel`, `cudaMemcpyAsync`, kernel execution) |
+| `D->>H` | solid | Device signals host after blocking wait (`cudaStreamSynchronize`) |
+| `D->>D` | solid | Device-to-device memcpy |
+| `Note over H,D` | note | Memory allocation/deallocation event |
+| `H->>H` | solid self | Host-only driver call (only with `--include-host-only`) |
+
+#### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--title TEXT` | filename stem | Markdown heading and diagram title |
+| `--max-rows N` | unlimited | Truncate to first N events (warns if > 200) |
+| `--types TYPE …` | all | Filter to `kernel`, `cuda api`, `memcpy`, `memset`, `memory` |
+| `--include-host-only` | off | Show host-only driver calls (`cuLibraryLoadData`, `cuKernelGetName`, etc.) as self-arrows |
+| `--no-duration` | off | Omit duration from edge labels |
+| `--no-bytes` | off | Omit byte counts from edge labels |
+
 ## 7. Clean
 
 ```bash
@@ -438,6 +566,8 @@ make clean
 | `src/libcudf_tpch_orders_groupby.cu` | Main C++/CUDA source |
 | `include/rmm_backtrace_resource_adaptor.hpp` | Custom RMM MR adaptor that prints a demangled call stack on every alloc/dealloc |
 | `scripts/make_tpch_orders.py` | Python script to generate TPC-H Orders Parquet/IPC data |
+| `scripts/extract_nsys_events.py` | Extract kernels, CUDA API calls, and memory events from a `.nsys-rep` report into a time-ordered CSV, scoped to an NVTX region |
+| `scripts/csv_to_mermaid_flow.py` | Convert the events CSV into a Markdown file with a Mermaid `sequenceDiagram` showing the Host↔Device message flow |
 | `CMakeLists.txt`      | CMake build definition |
 | `Makefile`            | Thin wrapper around CMake |
 | `environment.yml`     | Conda environment definition |

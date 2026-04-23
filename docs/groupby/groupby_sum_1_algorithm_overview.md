@@ -11,7 +11,7 @@ This document describes the high-level algorithm libcudf uses to compute a `grou
 
 ## Table of Contents
 
-- [1. Path Selection: Hash vs. Sort](#1-path-selection-hash-vs-sort)
+- [1. GroupBy Path Selection: Hash vs. Sort](#1-groupby-path-selection-hash-vs-sort)
 - [2. Core Data Structure: `cuco::static_set`](#2-core-data-structure-cucostaticset-cucollections)
 - [3. The Two-Kernel Aggregation Algorithm](#3-the-two-kernel-aggregation-algorithm)
 - [4. Output Key Gather](#4-output-key-gather)
@@ -24,7 +24,7 @@ This document describes the high-level algorithm libcudf uses to compute a `grou
 
 This section describes the high-level algorithm libcudf uses to compute a groupby+SUM aggregation on the GPU. The design is optimised for **throughput on wide inputs** (millions of rows) and relies on the cooperation of four NVIDIA open-source libraries: **cuDF**, **cuCollections**, **Thrust**, and **CUB** — all part of the CCCL umbrella.
 
-## 1. Path Selection: Hash vs. Sort
+## 1. GroupBy Path Selection: Hash vs. Sort
 
 libcudf supports two groupby strategies. The correct path is chosen at runtime:
 
@@ -36,29 +36,6 @@ libcudf supports two groupby strategies. The correct path is chosen at runtime:
 For `SUM` on a fixed-width numeric type, the **hash path** is always taken.
 
 > **This dataset**: `o_totalprice` is `int64` — a fixed-width numeric type with native atomic-add support → hash path is taken. Because the source and target types are both `int64`, no type widening occurs (`Source = Target = int64_t`).
-
----
-
-## 2. Core Data Structure: `cuco::static_set` (cuCollections)
-
-The hash groupby is built around a **device-side open-addressing hash set** (`cuco::static_set`) — referred to as `global_set` in the code — that maps each unique key (represented as a row-index into the input table) into a dense integer identifier. It is shared across all CUDA blocks and is the single source of truth for which keys have been seen globally. KERNEL 1 writes winning row-indices into it via CAS; the remapping steps between KERNEL 1 and KERNEL 2 then scan it to build the final output index map. The full lifecycle is walked through step by step in [Section 3](#3-the-two-kernel-aggregation-algorithm).
-
-```
-global_set slot layout (capacity = 2 × num_input_rows = 200M slots for N = 100M rows, load factor ≤ 50%):
-
- index:  [ 0 ][ 1 ][ 2 ][ 3 ] ... [ 199,999,999 ]
- value:  [EMPTY][EMPTY][ 7 ][EMPTY]... [12] ...   ← row-indices into `o_orderstatus` column of input table
-                        ↑                  ↑
-         row 7 has a unique `o_orderstatus` value   row 12 has a different unique `o_orderstatus` value
-```
-
-- **Key type**: `int32_t` row-index (cuDF `size_type`). Row hashing and equality comparison are performed by cuDF's row comparator against the `o_orderstatus` (`utf8`) column — MurmurHash3 over character bytes, byte-wise equality.
-- **Probing scheme**: `cuco::linear_probing<1,` [`row_hasher_with_cache_t`](../../cudf/cpp/src/groupby/hash/helpers.cuh#L56)`>` — single-step linear probing with an optional row-hash cache (pre-computed hashes stored in a `device_uvector`).
-- **Thread scope**: `cuda::thread_scope_device` (all GPU threads can access the same set).
-- **Sentinel**: [`CUDF_SIZE_TYPE_SENTINEL`](../../cudf/cpp/src/groupby/hash/compute_mapping_indices.cuh#L134) `= INT32_MAX` marks empty slots.
-- **Memory**: Allocated via `rmm::mr::polymorphic_allocator` backed by the caller-supplied RMM pool.
-
-Construction fires a GPU kernel (via `cub::DeviceFor`) to fill all 2×N slots with the sentinel in parallel before any insertions.
 
 ---
 
@@ -101,6 +78,46 @@ Phase 1 uses these to:
   shmem_price_accum[local_rank] += o_totalprice[row]          (for all 100M rows, in shared memory)
   total_price[global_label_idx]   += shmem_price_accum[local_rank]  (at most 128 flushes per block)
 ```
+
+---
+
+## 2. Core Data Structure: `cuco::static_set` (cuCollections)
+
+The hash groupby is built around a **device-side open-addressing hash set** (`cuco::static_set`) — referred to as `global_set` in the code — that maps each unique key (represented as a row-index into the input table) into a dense integer identifier. It is shared across all CUDA blocks and is the single source of truth for which keys have been seen globally.
+- KERNEL 1 writes winning row-indices into it via CAS;
+- the remapping steps between KERNEL 1 and KERNEL 2 then scan it to build the final output index map.
+
+```
+global_set slot layout (capacity = 2 × num_input_rows = 200M slots for N = 100M rows, load factor ≤ 50%):
+
+ index:  [ 0 ][ 1 ][ 2 ][ 3 ] ... [ 199,999,999 ]
+ value:  [EMPTY][EMPTY][ 7 ][EMPTY]... [12] ...   ← row-indices into `o_orderstatus` column of input table
+                        ↑                  ↑
+         row 7 has a unique `o_orderstatus` value   row 12 has a different unique `o_orderstatus` value
+```
+
+### Key access and storage design
+
+The set stores **row indices** (`int32_t`), not actual key values. When the set needs to hash or compare a candidate slot, it calls back into the original input column data on the GPU. This indirection is set up before any kernels run, in `dispatch_groupby()`:
+
+1. `preprocessed_table::create(keys, stream)` — copies the `column_device_view` metadata structs (data pointers, null masks, type IDs) into a GPU buffer so kernels can dereference them. The actual column bytes were already in GPU memory via RMM. **Cost: ~143 bytes** (one string column's metadata, as seen in the RMM trace).
+2. `self_comparator` — host factory that wraps the `preprocessed_table` and produces `device_row_comparator`, a GPU callable implementing `operator()(i, j)` → byte-wise string equality via `type_dispatcher`.
+3. `row_hasher` — same pattern; produces `device_row_hasher`, a GPU callable implementing `operator()(i)` → MurmurHash3 over all columns of row `i`. Both share the same `preprocessed_table` via `shared_ptr` to avoid a redundant GPU upload.
+
+These two callables are then embedded directly into the `cuco::static_set` constructor as the probing scheme and equality comparator, so every insert and lookup the set performs reaches back into the original key column memory.
+
+**Memory cost of the set itself**: 50% load factor → 2 × 100M = 200M slots × 4 bytes = **800 MB** (confirmed in the RMM trace at `compute_groupby` stack frame).
+
+---
+
+- **Key type**: `int32_t` row-index (cuDF `size_type`). Row hashing and equality comparison are performed by cuDF's row comparator against the `o_orderstatus` (`utf8`) column — MurmurHash3 over character bytes, byte-wise equality.
+- **Probing scheme**: `cuco::linear_probing<1,` [`row_hasher_with_cache_t`](../../cudf/cpp/src/groupby/hash/helpers.cuh#L56)`>` — single-step linear probing with an optional row-hash cache (pre-computed hashes stored in a `device_uvector`).
+- **Thread scope**: `cuda::thread_scope_device` (all GPU threads can access the same set).
+- **Sentinel**: [`CUDF_SIZE_TYPE_SENTINEL`](../../cudf/cpp/src/groupby/hash/compute_mapping_indices.cuh#L134) `= INT32_MAX` marks empty slots.
+- **Memory**: Allocated via `rmm::mr::polymorphic_allocator` backed by the caller-supplied RMM pool.
+- **Storage layout — buckets on top of slots**: cuCollections introduces a two-level slot hierarchy via [`cuco::storage<BucketSize>`](../../cuCollections/include/cuco/storage.cuh#L44). Rather than a flat array of individual slots, the backing store is an **array of buckets**, where each bucket holds `BucketSize` contiguous slots. `BucketSize = 1` is equivalent to flat storage. When `BucketSize > 1`, a single CUDA thread probes an entire bucket (multiple contiguous slots) in one step, which shortens the effective probing sequence length and reduces total memory transactions. This makes a larger bucket size beneficial for **memory-bandwidth-bound workloads** — in particular, high-occupancy multimap operations (e.g., `cuco::static_multimap`) where many threads compete for the same cache lines. For the groupby `static_set`, the bucket size is **hardcoded to 1** via [`GROUPBY_BUCKET_SIZE = 1`](../../cudf/cpp/src/groupby/hash/helpers.cuh#L22), giving flat per-slot probing — appropriate here since key cardinality is low and contention is minimal.
+
+Construction fires a GPU kernel (via `cub::DeviceFor`) to fill all 2×N slots with the sentinel in parallel before any insertions.
 
 ---
 
