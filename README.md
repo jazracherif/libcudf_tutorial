@@ -28,6 +28,7 @@ Demonstrates creating an Arrow-backed table in C++ with libcudf and running a `g
   - [6.5 Notes](#65-notes)
   - [6.6 Extract events from a report to CSV](#66-extract-events-from-a-report-to-csv)
   - [6.7 Generate a Host↔Device message flow diagram](#67-generate-a-hostdevice-message-flow-diagram)
+  - [6.8 Generate an interactive HTML sequence diagram](#68-generate-an-interactive-html-sequence-diagram)
 - [7. Clean](#7-clean)
 - [8. Files](#8-files)
 - [9. Internals and Documentation](#9-internals-and-documentation)
@@ -553,6 +554,64 @@ python scripts/csv_to_mermaid_flow.py nsight.csv flow.md \
 | `--no-duration` | off | Omit duration from edge labels |
 | `--no-bytes` | off | Omit byte counts from edge labels |
 
+### 6.8 Generate an interactive HTML sequence diagram
+
+`scripts/csv_to_nsight_html.py` reads the same CSV produced by
+`extract_nsys_events.py` and writes a **fully self-contained HTML file** —
+no server, no external assets — containing an inline SVG sequence diagram with
+an interactive detail panel.
+
+#### Basic usage
+
+```bash
+python scripts/csv_to_nsight_html.py \
+    docs/groupby/logs/nsight_aggregate.csv \
+    docs/groupby/logs/nsight_aggregate_flow.html
+```
+
+Add a custom title:
+
+```bash
+python scripts/csv_to_nsight_html.py \
+    docs/groupby/logs/nsight_aggregate.csv \
+    docs/groupby/logs/nsight_aggregate_flow.html \
+    --title "libcudf groupby — 100M rows — Nsight Trace"
+```
+
+Also emit host-only driver calls (`cuLibraryLoadData`, `cuGetProcAddress`, …)
+as note boxes on the Host lifeline:
+
+```bash
+python scripts/csv_to_nsight_html.py nsight.csv out.html --include-host-only
+```
+
+#### Layout
+
+The page is divided into two columns:
+
+| Column | Content |
+|--------|---------|
+| **Diagram** (left, scrollable) | Sticky participant header row (`Host (CPU)` / `Device (GPU)`) + one SVG row per event |
+| **Detail panel** (right, 420 px fixed) | Legend + a two-column key/value table populated when any row is clicked |
+
+Each SVG row shows:
+
+- **Timeline** column — cumulative offset from the first event and the delta from the previous row.
+- **Arrow** (CUDA API calls, Memcpy, Memset) — solid for blocking calls, dashed for async.
+- **Amber box** (sync points such as `cudaStreamSynchronize`) — centred on the Host lifeline.
+- **Blue box** (kernel executions) — centred on the Device lifeline.
+- **Grey spanning box** (memory allocation/deallocation events) — spans both lifelines.
+
+Click any row to populate the detail panel with all CSV fields for that event.
+
+#### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `OUTPUT` | `<input stem>_flow.html` | Path for the generated HTML file |
+| `--title TEXT` | filename stem | `<h2>` heading at the top of the diagram column |
+| `--include-host-only` | off | Include host-only driver calls as note boxes on the Host lifeline |
+
 ## 7. Clean
 
 ```bash
@@ -568,6 +627,7 @@ make clean
 | `scripts/make_tpch_orders.py` | Python script to generate TPC-H Orders Parquet/IPC data |
 | `scripts/extract_nsys_events.py` | Extract kernels, CUDA API calls, and memory events from a `.nsys-rep` report into a time-ordered CSV, scoped to an NVTX region |
 | `scripts/csv_to_mermaid_flow.py` | Convert the events CSV into a Markdown file with a Mermaid `sequenceDiagram` showing the Host↔Device message flow |
+| `scripts/csv_to_nsight_html.py` | Convert the events CSV into a fully self-contained interactive HTML sequence diagram with a sticky header, scrollable event rows, and a click-to-detail right panel |
 | `CMakeLists.txt`      | CMake build definition |
 | `Makefile`            | Thin wrapper around CMake |
 | `environment.yml`     | Conda environment definition |
