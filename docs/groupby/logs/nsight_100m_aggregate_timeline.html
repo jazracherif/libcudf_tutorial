@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>libcudf groupby orders 100M libcudf aggregate</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }               /* reset default browser spacing */
+body { font-family: monospace; font-size: 14px; background: #fff; color: #222; }
+h2 { padding: 6px 12px; font-size: 16px; border-bottom: 1px solid #ddd; background: #f5f5f5; } /* title bar above the diagram */
+#desc { padding: 6px 0 10px; font-size: 12px; color: #555; line-height: 1.6;
+         border-bottom: 1px solid #ddd; margin-bottom: 6px; }                          /* legend above the detail table inside the right panel */
+#page-layout { display: flex; flex-direction: row; height: 100vh; }        /* side-by-side layout; fills viewport height */
+#diagram-column { display: flex; flex-direction: column; flex: 0 0 auto; }     /* inner column: title + description + diagram stacked vertically */
+#diagram-scroll { flex: 1 1 0; overflow: auto; position: relative; }    /* single scroll container — x+y scroll tracks header and body together */
+#diagram-sticky-header { position: sticky; top: 0; z-index: 10; background: #fff; line-height: 0; } /* participant boxes; sticks to top when rows scroll beneath */
+#diagram-rows { display: block; }                                        /* event rows body; flows directly below the sticky header */
+#info-panel { flex: 0 0 520px; overflow-y: auto; padding: 6px 12px;     /* fixed 520px right panel; scrolls independently */
+           border-left: 2px solid #ccc; background: #fafafa;
+           font-size: 13px; color: #333; }
+#info-panel table { border-collapse: collapse; width: 100%; margin-top: 14px; } /* no double-borders; gap between legend text and table */
+#info-panel td { padding: 3px 8px; border: 1px solid #e8e8e8;
+              vertical-align: top; word-break: break-all; }           /* long hex addresses / paths wrap instead of overflowing */
+#info-panel td:first-child { font-weight: bold; white-space: nowrap; color: #666;
+                          width: 150px; background: #f0f0f0; word-break: normal; } /* key column: fixed width, never broken mid-word */
+#info-panel .placeholder { color: #aaa; padding: 4px; }                           /* placeholder text shown before any row is clicked */
+#summary, #trace-stats, #top-kernels, #duration-legend { margin: 0 0 12px; padding-bottom: 12px; border-bottom: 1px solid #ddd; }
+#summary h3, #trace-stats h3, #top-kernels h3, #duration-legend h3, #detail-heading { font-size: 13px; margin: 0 0 6px; color: #555; }
+#summary p { font-size: 12px; color: #555; line-height: 1.6; }
+.stats-grid { display: grid; gap: 10px; font-size: 12px; }
+.stat-group { display: grid; gap: 4px; }
+.stat-group h4 { font-size: 11px; font-weight: 700; color: #555; text-transform: uppercase; letter-spacing: 0; margin: 0; }
+.stat-row { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.stat-row span { color: #666; }
+.stat-row strong { font-weight: 600; color: #222; word-break: break-word; }
+.stats-note { margin-top: 8px; font-size: 11px; line-height: 1.4; color: #777; }
+#detail-heading { margin-top: 18px; padding-top: 12px; border-top: 1px solid #ddd; }
+#info-table { margin-top: 8px; }
+#top-kernels table { border-collapse: collapse; width: 100%; margin: 0; font-size: 12px; }
+#top-kernels th, #top-kernels td { padding: 3px 6px; border: 1px solid #e8e8e8; text-align: left; vertical-align: top; }
+#top-kernels th { background: #f0f0f0; color: #555; }
+#top-kernels th:first-child, #top-kernels td:first-child { width: 24px; min-width: 24px; max-width: 24px; padding-left: 3px; padding-right: 3px; text-align: center; }
+#duration-legend ul { list-style: none; display: grid; gap: 4px; font-size: 12px; }
+.duration-chip { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.duration-chip::before { content: ""; display: inline-block; width: 14px; height: 8px; border: 1px solid #8aa6c4; }
+.duration-chip.table-chip { font-size: 11px; }
+.duration-chip.base::before { background: #dce8f7; }
+.duration-chip.p75::before { background: #b7d5f3; }
+.duration-chip.p90::before { background: #f5d66d; border-color: #c59b22; }
+.duration-chip.p97::before { background: #f59f45; border-color: #b86212; }
+.duration-chip.max::before { background: #e35d5b; border-color: #9f2f2d; }
+/* SVG styles */
+svg text  { font-family: monospace; }
+.participant-name { font-size: 14px; font-weight: bold; fill: #333; }       /* participant header labels: "Host (CPU)", "Device (GPU)" */
+.timeline-header  { font-size: 13px; font-weight: bold; fill: #555; }       /* "Timeline" column header */
+.time-cumulative  { font-size: 12px; fill: #555; }                           /* cumulative time from first event (darker) */
+.time-delta       { font-size: 12px; fill: #999; }                           /* delta from previous row (lighter grey) */
+.arrow-label      { font-size: 13px; fill: #222; }                           /* arrow label rendered above the midpoint of a <line> */
+.box-label        { font-size: 13px; fill: #222; }                           /* primary text line inside a note box (kernel name / API call) */
+.box-sublabel     { font-size: 12px; fill: #666; }                           /* secondary text line (grid/block dims or duration) */
+.event-row    { cursor: pointer; }                                        /* hand cursor signals all rows are clickable */
+.event-row .row-hitbox       { fill: transparent; }                              /* invisible rect covering full row width — enables hover/click on empty areas */
+.event-row:hover .row-hitbox { fill: rgba(0, 0, 0, 0.04); }                     /* faint dark tint on hover */
+.event-row.selected .row-hitbox   { fill: rgba(60, 120, 200, 0.10); }                /* blue tint applied by selectEvent() to the selected row */
+.device-note.duration-base { fill: #dce8f7; stroke: #5580aa; }
+.device-note.duration-p75 { fill: #b7d5f3; stroke: #4073a6; }
+.device-note.duration-p90 { fill: #f5d66d; stroke: #c59b22; }
+.device-note.duration-p97 { fill: #f59f45; stroke: #b86212; }
+.device-note.duration-max { fill: #e35d5b; stroke: #9f2f2d; }
+</style>
+</head>
+<body>
+<div id="page-layout">
+  <div id="diagram-column">
+    <h2>libcudf groupby orders 100M libcudf aggregate</h2>
+    <div id="diagram-scroll">
+      <div id="diagram-sticky-header"><svg xmlns="http://www.w3.org/2000/svg" width="1060" height="52">
+  <rect x="238" y="6" width="124" height="28" rx="3" fill="#eee" stroke="#aaa" stroke-width="1"/>
+  <text x="300" y="25" text-anchor="middle" class="participant-name">Host (CPU)</text>
+  <rect x="738" y="6" width="124" height="28" rx="3" fill="#eee" stroke="#aaa" stroke-width="1"/>
+  <text x="800" y="25" text-anchor="middle" class="participant-name">Device (GPU)</text>
+  <text x="110" y="25" text-anchor="end" class="timeline-header">Timeline</text>
+  <line x1="0" y1="51" x2="1060" y2="51" stroke="#ccc" stroke-width="1"/>
+</svg></div>
+      <div id="diagram-rows"><svg xmlns="http://www.w3.org/2000/svg" width="1060" height="5918">
+  <defs>
+    <marker id="arrowhead-solid" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#333"/>
+    </marker>
+    <marker id="arrowhead-dashed" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#666"/>
+    </marker>
+    <marker id="arrowhead-solid-red" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#cc2222"/>
+    </marker>
+    <marker id="arrowhead-dashed-red" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#cc6666"/>
+    </marker>
+  </defs>
+  <line x1="300" y1="0" x2="300" y2="5918" stroke="#ccc" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <line x1="800" y1="0" x2="800" y2="5918" stroke="#ccc" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <g class="event-row" data-idx="0" onclick="selectEvent(0)">
+    <rect class="row-hitbox" x="0" y="0" width="1060" height="82"/>
+    <text x="110" y="36" text-anchor="end" class="time-cumulative">t = 0</text>
+    <rect x="125" y="4" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="35" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="49" text-anchor="middle" class="box-sublabel">5.408 μs</text>
+  </g>
+  <g class="event-row" data-idx="1" onclick="selectEvent(1)">
+    <rect class="row-hitbox" x="0" y="82" width="1060" height="40"/>
+    <text x="110" y="97" text-anchor="end" class="time-cumulative">10.4 μs</text>
+    <text x="110" y="109" text-anchor="end" class="time-delta">+10.4 μs</text>
+    <text x="550" y="98" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (143 B) [279.056 μs]</text>
+    <line x1="307" y1="102" x2="793" y2="102" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="2" onclick="selectEvent(2)">
+    <rect class="row-hitbox" x="0" y="122" width="1060" height="40"/>
+    <text x="110" y="137" text-anchor="end" class="time-cumulative">297.1 μs</text>
+    <text x="110" y="149" text-anchor="end" class="time-delta">+286.7 μs</text>
+    <text x="550" y="138" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [16.912 μs]</text>
+    <line x1="307" y1="142" x2="793" y2="142" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="3" onclick="selectEvent(3)">
+    <rect class="row-hitbox" x="0" y="162" width="1060" height="40"/>
+    <text x="110" y="177" text-anchor="end" class="time-cumulative">317.1 μs</text>
+    <text x="110" y="189" text-anchor="end" class="time-delta">+20.0 μs</text>
+    <text x="550" y="178" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy H→D (128 B) [4.128 μs]</text>
+    <line x1="307" y1="182" x2="793" y2="182" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="4" onclick="selectEvent(4)">
+    <rect class="row-hitbox" x="0" y="202" width="1060" height="40"/>
+    <text x="110" y="217" text-anchor="end" class="time-cumulative">323.3 μs</text>
+    <text x="110" y="229" text-anchor="end" class="time-delta">+6.2 μs</text>
+    <text x="550" y="218" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (800.0 MB) [22.911 ms]</text>
+    <line x1="307" y1="222" x2="793" y2="222" stroke="#cc2222" stroke-width="3.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="5" onclick="selectEvent(5)">
+    <rect class="row-hitbox" x="0" y="242" width="1060" height="40"/>
+    <text x="110" y="257" text-anchor="end" class="time-cumulative">26.445 ms</text>
+    <text x="110" y="269" text-anchor="end" class="time-delta">+26.121 ms</text>
+    <text x="550" y="258" text-anchor="middle" class="arrow-label">cudaLaunchKernel [1.470 ms]</text>
+    <line x1="307" y1="262" x2="793" y2="262" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="6" onclick="selectEvent(6)">
+    <rect class="row-hitbox" x="0" y="282" width="1060" height="82"/>
+    <text x="110" y="318" text-anchor="end" class="time-cumulative">27.914 ms</text>
+    <text x="110" y="330" text-anchor="end" class="time-delta">+1.470 ms</text>
+    <rect x="625" y="286" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-p75"/>
+    <text x="800" y="310" text-anchor="middle" class="box-label">static_kernel (4.105 ms)</text>
+    <text x="800" y="324" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;390625,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;256,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="337" text-anchor="middle" class="box-sublabel">regsPerThread=16</text>
+  </g>
+  <g class="event-row" data-idx="7" onclick="selectEvent(7)">
+    <rect class="row-hitbox" x="0" y="364" width="1060" height="82"/>
+    <text x="110" y="400" text-anchor="end" class="time-cumulative">27.922 ms</text>
+    <text x="110" y="412" text-anchor="end" class="time-delta">+7.4 μs</text>
+    <rect x="125" y="368" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="399" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="413" text-anchor="middle" class="box-sublabel">5.526 ms</text>
+  </g>
+  <g class="event-row" data-idx="8" onclick="selectEvent(8)">
+    <rect class="row-hitbox" x="0" y="446" width="1060" height="40"/>
+    <text x="110" y="461" text-anchor="end" class="time-cumulative">33.530 ms</text>
+    <text x="110" y="473" text-anchor="end" class="time-delta">+5.609 ms</text>
+    <text x="550" y="462" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (4 B) [44.304 μs]</text>
+    <line x1="307" y1="466" x2="793" y2="466" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="9" onclick="selectEvent(9)">
+    <rect class="row-hitbox" x="0" y="486" width="1060" height="40"/>
+    <text x="110" y="501" text-anchor="end" class="time-cumulative">33.576 ms</text>
+    <text x="110" y="513" text-anchor="end" class="time-delta">+46.0 μs</text>
+    <text x="550" y="502" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [18.512 μs]</text>
+    <line x1="307" y1="506" x2="793" y2="506" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="10" onclick="selectEvent(10)">
+    <rect class="row-hitbox" x="0" y="526" width="1060" height="40"/>
+    <text x="110" y="541" text-anchor="end" class="time-cumulative">33.590 ms</text>
+    <text x="110" y="553" text-anchor="end" class="time-delta">+13.3 μs</text>
+    <text x="550" y="542" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy H→D (4 B) [3.264 μs]</text>
+    <line x1="307" y1="546" x2="793" y2="546" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="11" onclick="selectEvent(11)">
+    <rect class="row-hitbox" x="0" y="566" width="1060" height="40"/>
+    <text x="110" y="581" text-anchor="end" class="time-cumulative">39.633 ms</text>
+    <text x="110" y="593" text-anchor="end" class="time-delta">+6.044 ms</text>
+    <text x="550" y="582" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (400.0 MB) [11.266 ms]</text>
+    <line x1="307" y1="586" x2="793" y2="586" stroke="#cc2222" stroke-width="3.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="12" onclick="selectEvent(12)">
+    <rect class="row-hitbox" x="0" y="606" width="1060" height="40"/>
+    <text x="110" y="621" text-anchor="end" class="time-cumulative">50.905 ms</text>
+    <text x="110" y="633" text-anchor="end" class="time-delta">+11.271 ms</text>
+    <text x="550" y="622" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (221 KB) [10.672 μs]</text>
+    <line x1="307" y1="626" x2="793" y2="626" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="13" onclick="selectEvent(13)">
+    <rect class="row-hitbox" x="0" y="646" width="1060" height="40"/>
+    <text x="110" y="661" text-anchor="end" class="time-cumulative">50.932 ms</text>
+    <text x="110" y="673" text-anchor="end" class="time-delta">+27.6 μs</text>
+    <text x="550" y="662" text-anchor="middle" class="arrow-label">cudaLaunchKernel [44.320 μs]</text>
+    <line x1="307" y1="666" x2="793" y2="666" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="14" onclick="selectEvent(14)">
+    <rect class="row-hitbox" x="0" y="686" width="1060" height="82"/>
+    <text x="110" y="722" text-anchor="end" class="time-cumulative">50.978 ms</text>
+    <text x="110" y="734" text-anchor="end" class="time-delta">+45.7 μs</text>
+    <rect x="625" y="690" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-base"/>
+    <text x="800" y="714" text-anchor="middle" class="box-label">static_kernel (3.840 μs)</text>
+    <text x="800" y="728" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;108,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;256,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="741" text-anchor="middle" class="box-sublabel">regsPerThread=16</text>
+  </g>
+  <g class="event-row" data-idx="15" onclick="selectEvent(15)">
+    <rect class="row-hitbox" x="0" y="768" width="1060" height="40"/>
+    <text x="110" y="783" text-anchor="end" class="time-cumulative">50.979 ms</text>
+    <text x="110" y="795" text-anchor="end" class="time-delta">+1.1 μs</text>
+    <text x="550" y="784" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (1 KB) [2.848 μs]</text>
+    <line x1="307" y1="788" x2="793" y2="788" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="16" onclick="selectEvent(16)">
+    <rect class="row-hitbox" x="0" y="808" width="1060" height="40"/>
+    <text x="110" y="823" text-anchor="end" class="time-cumulative">50.983 ms</text>
+    <text x="110" y="835" text-anchor="end" class="time-delta">+3.5 μs</text>
+    <text x="550" y="824" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (4 B) [3.872 μs]</text>
+    <line x1="307" y1="828" x2="793" y2="828" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="17" onclick="selectEvent(17)">
+    <rect class="row-hitbox" x="0" y="848" width="1060" height="40"/>
+    <text x="110" y="863" text-anchor="end" class="time-cumulative">50.988 ms</text>
+    <text x="110" y="875" text-anchor="end" class="time-delta">+4.9 μs</text>
+    <text x="550" y="864" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemsetAsync [7.376 μs]</text>
+    <line x1="307" y1="868" x2="793" y2="868" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="18" onclick="selectEvent(18)">
+    <rect class="row-hitbox" x="0" y="888" width="1060" height="40"/>
+    <text x="110" y="903" text-anchor="end" class="time-cumulative">50.992 ms</text>
+    <text x="110" y="915" text-anchor="end" class="time-delta">+4.0 μs</text>
+    <text x="550" y="904" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memset (4 B) [768 ns]</text>
+    <line x1="307" y1="908" x2="793" y2="908" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="19" onclick="selectEvent(19)">
+    <rect class="row-hitbox" x="0" y="928" width="1060" height="40"/>
+    <text x="110" y="943" text-anchor="end" class="time-cumulative">50.996 ms</text>
+    <text x="110" y="955" text-anchor="end" class="time-delta">+4.8 μs</text>
+    <text x="550" y="944" text-anchor="middle" class="arrow-label">cudaLaunchKernel [6.048 μs]</text>
+    <line x1="307" y1="948" x2="793" y2="948" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="20" onclick="selectEvent(20)">
+    <rect class="row-hitbox" x="0" y="968" width="1060" height="82"/>
+    <text x="110" y="1004" text-anchor="end" class="time-cumulative">50.999 ms</text>
+    <text x="110" y="1016" text-anchor="end" class="time-delta">+2.8 μs</text>
+    <rect x="625" y="972" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-p90"/>
+    <text x="800" y="996" text-anchor="middle" class="box-label">mapping_indices_kernel (4.784 ms)</text>
+    <text x="800" y="1010" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;432,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;128,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="1023" text-anchor="middle" class="box-sublabel">statShmem=1984B; regsPerThread=56</text>
+  </g>
+  <g class="event-row" data-idx="21" onclick="selectEvent(21)">
+    <rect class="row-hitbox" x="0" y="1050" width="1060" height="40"/>
+    <text x="110" y="1065" text-anchor="end" class="time-cumulative">51.003 ms</text>
+    <text x="110" y="1077" text-anchor="end" class="time-delta">+4.2 μs</text>
+    <text x="550" y="1066" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [5.313 ms]</text>
+    <line x1="307" y1="1070" x2="793" y2="1070" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="22" onclick="selectEvent(22)">
+    <rect class="row-hitbox" x="0" y="1090" width="1060" height="40"/>
+    <text x="110" y="1105" text-anchor="end" class="time-cumulative">55.793 ms</text>
+    <text x="110" y="1117" text-anchor="end" class="time-delta">+4.790 ms</text>
+    <text x="550" y="1106" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy D→H (4 B) [5.952 μs]</text>
+    <line x1="793" y1="1110" x2="307" y2="1110" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="23" onclick="selectEvent(23)">
+    <rect class="row-hitbox" x="0" y="1130" width="1060" height="82"/>
+    <text x="110" y="1166" text-anchor="end" class="time-cumulative">56.317 ms</text>
+    <text x="110" y="1178" text-anchor="end" class="time-delta">+524.2 μs</text>
+    <rect x="125" y="1134" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="1165" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="1179" text-anchor="middle" class="box-sublabel">2.912 μs</text>
+  </g>
+  <g class="event-row" data-idx="24" onclick="selectEvent(24)">
+    <rect class="row-hitbox" x="0" y="1212" width="1060" height="40"/>
+    <text x="110" y="1227" text-anchor="end" class="time-cumulative">56.332 ms</text>
+    <text x="110" y="1239" text-anchor="end" class="time-delta">+15.4 μs</text>
+    <text x="550" y="1228" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (400.0 MB) [11.502 ms]</text>
+    <line x1="307" y1="1232" x2="793" y2="1232" stroke="#cc2222" stroke-width="3.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="25" onclick="selectEvent(25)">
+    <rect class="row-hitbox" x="0" y="1252" width="1060" height="40"/>
+    <text x="110" y="1267" text-anchor="end" class="time-cumulative">67.838 ms</text>
+    <text x="110" y="1279" text-anchor="end" class="time-delta">+11.506 ms</text>
+    <text x="550" y="1268" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (8 B) [10.992 μs]</text>
+    <line x1="307" y1="1272" x2="793" y2="1272" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="26" onclick="selectEvent(26)">
+    <rect class="row-hitbox" x="0" y="1292" width="1060" height="40"/>
+    <text x="110" y="1307" text-anchor="end" class="time-cumulative">67.856 ms</text>
+    <text x="110" y="1319" text-anchor="end" class="time-delta">+17.9 μs</text>
+    <text x="550" y="1308" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (278 KB) [3.200 μs]</text>
+    <line x1="307" y1="1312" x2="793" y2="1312" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="27" onclick="selectEvent(27)">
+    <rect class="row-hitbox" x="0" y="1332" width="1060" height="40"/>
+    <text x="110" y="1347" text-anchor="end" class="time-cumulative">67.868 ms</text>
+    <text x="110" y="1359" text-anchor="end" class="time-delta">+11.8 μs</text>
+    <text x="550" y="1348" text-anchor="middle" class="arrow-label">cudaLaunchKernel [45.376 μs]</text>
+    <line x1="307" y1="1352" x2="793" y2="1352" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="28" onclick="selectEvent(28)">
+    <rect class="row-hitbox" x="0" y="1372" width="1060" height="40"/>
+    <text x="110" y="1387" text-anchor="end" class="time-cumulative">67.921 ms</text>
+    <text x="110" y="1399" text-anchor="end" class="time-delta">+53.6 μs</text>
+    <text x="550" y="1388" text-anchor="middle" class="arrow-label">cudaLaunchKernel [18.256 μs]</text>
+    <line x1="307" y1="1392" x2="793" y2="1392" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="29" onclick="selectEvent(29)">
+    <rect class="row-hitbox" x="0" y="1412" width="1060" height="82"/>
+    <text x="110" y="1448" text-anchor="end" class="time-cumulative">67.929 ms</text>
+    <text x="110" y="1460" text-anchor="end" class="time-delta">+7.3 μs</text>
+    <rect x="625" y="1416" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-base"/>
+    <text x="800" y="1440" text-anchor="middle" class="box-label">DeviceCompactInitKernel (2.848 μs)</text>
+    <text x="800" y="1454" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;272,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;128,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="1467" text-anchor="middle" class="box-sublabel">regsPerThread=16</text>
+  </g>
+  <g class="event-row" data-idx="30" onclick="selectEvent(30)">
+    <rect class="row-hitbox" x="0" y="1494" width="1060" height="82"/>
+    <text x="110" y="1530" text-anchor="end" class="time-cumulative">67.936 ms</text>
+    <text x="110" y="1542" text-anchor="end" class="time-delta">+7.7 μs</text>
+    <rect x="625" y="1498" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-p75"/>
+    <text x="800" y="1522" text-anchor="middle" class="box-label">DeviceSelectSweepKernel (3.439 ms)</text>
+    <text x="800" y="1536" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;34723,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;384,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="1549" text-anchor="middle" class="box-sublabel">statShmem=23040B; regsPerThread=56</text>
+  </g>
+  <g class="event-row" data-idx="31" onclick="selectEvent(31)">
+    <rect class="row-hitbox" x="0" y="1576" width="1060" height="40"/>
+    <text x="110" y="1591" text-anchor="end" class="time-cumulative">67.941 ms</text>
+    <text x="110" y="1603" text-anchor="end" class="time-delta">+4.9 μs</text>
+    <text x="550" y="1592" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [4.657 ms]</text>
+    <line x1="307" y1="1596" x2="793" y2="1596" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="32" onclick="selectEvent(32)">
+    <rect class="row-hitbox" x="0" y="1616" width="1060" height="40"/>
+    <text x="110" y="1631" text-anchor="end" class="time-cumulative">71.380 ms</text>
+    <text x="110" y="1643" text-anchor="end" class="time-delta">+3.438 ms</text>
+    <text x="550" y="1632" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy D→H (8 B) [5.312 μs]</text>
+    <line x1="793" y1="1636" x2="307" y2="1636" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="33" onclick="selectEvent(33)">
+    <rect class="row-hitbox" x="0" y="1656" width="1060" height="82"/>
+    <text x="110" y="1692" text-anchor="end" class="time-cumulative">72.734 ms</text>
+    <text x="110" y="1704" text-anchor="end" class="time-delta">+1.354 ms</text>
+    <rect x="125" y="1660" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="1691" text-anchor="middle" class="box-label">cuStreamSynchronize</text>
+    <text x="300" y="1705" text-anchor="middle" class="box-sublabel">9.136 μs</text>
+  </g>
+  <g class="event-row" data-idx="34" onclick="selectEvent(34)">
+    <rect class="row-hitbox" x="0" y="1738" width="1060" height="40"/>
+    <text x="110" y="1753" text-anchor="end" class="time-cumulative">72.748 ms</text>
+    <text x="110" y="1765" text-anchor="end" class="time-delta">+13.4 μs</text>
+    <text x="550" y="1754" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (278 KB) [43.600 μs]</text>
+    <line x1="307" y1="1758" x2="793" y2="1758" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="35" onclick="selectEvent(35)">
+    <rect class="row-hitbox" x="0" y="1778" width="1060" height="40"/>
+    <text x="110" y="1793" text-anchor="end" class="time-cumulative">72.792 ms</text>
+    <text x="110" y="1805" text-anchor="end" class="time-delta">+43.8 μs</text>
+    <text x="550" y="1794" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (8 B) [6.160 μs]</text>
+    <line x1="307" y1="1798" x2="793" y2="1798" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="36" onclick="selectEvent(36)">
+    <rect class="row-hitbox" x="0" y="1818" width="1060" height="40"/>
+    <text x="110" y="1833" text-anchor="end" class="time-cumulative">72.804 ms</text>
+    <text x="110" y="1845" text-anchor="end" class="time-delta">+12.6 μs</text>
+    <text x="550" y="1834" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (400.0 MB) [11.463 ms]</text>
+    <line x1="307" y1="1838" x2="793" y2="1838" stroke="#cc2222" stroke-width="3.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="37" onclick="selectEvent(37)">
+    <rect class="row-hitbox" x="0" y="1858" width="1060" height="40"/>
+    <text x="110" y="1873" text-anchor="end" class="time-cumulative">85.336 ms</text>
+    <text x="110" y="1885" text-anchor="end" class="time-delta">+12.532 ms</text>
+    <text x="550" y="1874" text-anchor="middle" class="arrow-label">cudaLaunchKernel [19.712 μs]</text>
+    <line x1="307" y1="1878" x2="793" y2="1878" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="38" onclick="selectEvent(38)">
+    <rect class="row-hitbox" x="0" y="1898" width="1060" height="82"/>
+    <text x="110" y="1934" text-anchor="end" class="time-cumulative">85.357 ms</text>
+    <text x="110" y="1946" text-anchor="end" class="time-delta">+20.6 μs</text>
+    <rect x="625" y="1902" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-base"/>
+    <text x="800" y="1926" text-anchor="middle" class="box-label">transform_kernel (5.568 μs)</text>
+    <text x="800" y="1940" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;1,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;256,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="1953" text-anchor="middle" class="box-sublabel">regsPerThread=34</text>
+  </g>
+  <g class="event-row" data-idx="39" onclick="selectEvent(39)">
+    <rect class="row-hitbox" x="0" y="1980" width="1060" height="40"/>
+    <text x="110" y="1995" text-anchor="end" class="time-cumulative">85.442 ms</text>
+    <text x="110" y="2007" text-anchor="end" class="time-delta">+85.0 μs</text>
+    <text x="550" y="1996" text-anchor="middle" class="arrow-label">cudaLaunchKernel [1.078 ms]</text>
+    <line x1="307" y1="2000" x2="793" y2="2000" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="40" onclick="selectEvent(40)">
+    <rect class="row-hitbox" x="0" y="2020" width="1060" height="82"/>
+    <text x="110" y="2056" text-anchor="end" class="time-cumulative">86.512 ms</text>
+    <text x="110" y="2068" text-anchor="end" class="time-delta">+1.070 ms</text>
+    <rect x="625" y="2024" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-base"/>
+    <text x="800" y="2048" text-anchor="middle" class="box-label">static_kernel (4.960 μs)</text>
+    <text x="800" y="2062" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;108,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;256,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="2075" text-anchor="middle" class="box-sublabel">regsPerThread=16</text>
+  </g>
+  <g class="event-row" data-idx="41" onclick="selectEvent(41)">
+    <rect class="row-hitbox" x="0" y="2102" width="1060" height="40"/>
+    <text x="110" y="2117" text-anchor="end" class="time-cumulative">86.533 ms</text>
+    <text x="110" y="2129" text-anchor="end" class="time-delta">+20.6 μs</text>
+    <text x="550" y="2118" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (400.0 MB) [2.830 ms]</text>
+    <line x1="307" y1="2122" x2="793" y2="2122" stroke="#cc2222" stroke-width="3.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="42" onclick="selectEvent(42)">
+    <rect class="row-hitbox" x="0" y="2142" width="1060" height="82"/>
+    <text x="110" y="2178" text-anchor="end" class="time-cumulative">89.370 ms</text>
+    <text x="110" y="2190" text-anchor="end" class="time-delta">+2.837 ms</text>
+    <rect x="125" y="2146" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="2177" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="2191" text-anchor="middle" class="box-sublabel">5.360 μs</text>
+  </g>
+  <g class="event-row" data-idx="43" onclick="selectEvent(43)">
+    <rect class="row-hitbox" x="0" y="2224" width="1060" height="40"/>
+    <text x="110" y="2239" text-anchor="end" class="time-cumulative">89.380 ms</text>
+    <text x="110" y="2251" text-anchor="end" class="time-delta">+9.9 μs</text>
+    <text x="550" y="2240" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (79 B) [12.416 μs]</text>
+    <line x1="307" y1="2244" x2="793" y2="2244" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="44" onclick="selectEvent(44)">
+    <rect class="row-hitbox" x="0" y="2264" width="1060" height="40"/>
+    <text x="110" y="2279" text-anchor="end" class="time-cumulative">89.395 ms</text>
+    <text x="110" y="2291" text-anchor="end" class="time-delta">+15.3 μs</text>
+    <text x="550" y="2280" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [11.248 μs]</text>
+    <line x1="307" y1="2284" x2="793" y2="2284" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="45" onclick="selectEvent(45)">
+    <rect class="row-hitbox" x="0" y="2304" width="1060" height="40"/>
+    <text x="110" y="2319" text-anchor="end" class="time-cumulative">89.407 ms</text>
+    <text x="110" y="2331" text-anchor="end" class="time-delta">+12.3 μs</text>
+    <text x="550" y="2320" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy H→D (64 B) [2.688 μs]</text>
+    <line x1="307" y1="2324" x2="793" y2="2324" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="46" onclick="selectEvent(46)">
+    <rect class="row-hitbox" x="0" y="2344" width="1060" height="40"/>
+    <text x="110" y="2359" text-anchor="end" class="time-cumulative">89.431 ms</text>
+    <text x="110" y="2371" text-anchor="end" class="time-delta">+23.8 μs</text>
+    <text x="550" y="2360" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (24 B) [3.376 μs]</text>
+    <line x1="307" y1="2364" x2="793" y2="2364" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="47" onclick="selectEvent(47)">
+    <rect class="row-hitbox" x="0" y="2384" width="1060" height="40"/>
+    <text x="110" y="2399" text-anchor="end" class="time-cumulative">89.436 ms</text>
+    <text x="110" y="2411" text-anchor="end" class="time-delta">+4.7 μs</text>
+    <text x="550" y="2400" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemsetAsync [304 ns]</text>
+    <line x1="307" y1="2404" x2="793" y2="2404" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="48" onclick="selectEvent(48)">
+    <rect class="row-hitbox" x="0" y="2424" width="1060" height="40"/>
+    <text x="110" y="2439" text-anchor="end" class="time-cumulative">89.468 ms</text>
+    <text x="110" y="2451" text-anchor="end" class="time-delta">+32.2 μs</text>
+    <text x="550" y="2440" text-anchor="middle" class="arrow-label">cudaLaunchKernel [6.736 μs]</text>
+    <line x1="307" y1="2444" x2="793" y2="2444" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="49" onclick="selectEvent(49)">
+    <rect class="row-hitbox" x="0" y="2464" width="1060" height="82"/>
+    <text x="110" y="2500" text-anchor="end" class="time-cumulative">89.477 ms</text>
+    <text x="110" y="2512" text-anchor="end" class="time-delta">+9.2 μs</text>
+    <rect x="625" y="2468" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-base"/>
+    <text x="800" y="2492" text-anchor="middle" class="box-label">transform_kernel (1.312 μs)</text>
+    <text x="800" y="2506" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;1,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;128,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="2519" text-anchor="middle" class="box-sublabel">regsPerThread=32</text>
+  </g>
+  <g class="event-row" data-idx="50" onclick="selectEvent(50)">
+    <rect class="row-hitbox" x="0" y="2546" width="1060" height="82"/>
+    <text x="110" y="2582" text-anchor="end" class="time-cumulative">89.477 ms</text>
+    <text x="110" y="2594" text-anchor="end" class="time-delta">+160 ns</text>
+    <rect x="125" y="2550" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="2581" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="2595" text-anchor="middle" class="box-sublabel">211.536 μs</text>
+  </g>
+  <g class="event-row" data-idx="51" onclick="selectEvent(51)">
+    <rect class="row-hitbox" x="0" y="2628" width="1060" height="40"/>
+    <text x="110" y="2643" text-anchor="end" class="time-cumulative">89.697 ms</text>
+    <text x="110" y="2655" text-anchor="end" class="time-delta">+219.4 μs</text>
+    <text x="550" y="2644" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (79 B) [44.608 μs]</text>
+    <line x1="307" y1="2648" x2="793" y2="2648" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="52" onclick="selectEvent(52)">
+    <rect class="row-hitbox" x="0" y="2668" width="1060" height="40"/>
+    <text x="110" y="2683" text-anchor="end" class="time-cumulative">89.744 ms</text>
+    <text x="110" y="2695" text-anchor="end" class="time-delta">+47.3 μs</text>
+    <text x="550" y="2684" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [14.144 μs]</text>
+    <line x1="307" y1="2688" x2="793" y2="2688" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="53" onclick="selectEvent(53)">
+    <rect class="row-hitbox" x="0" y="2708" width="1060" height="40"/>
+    <text x="110" y="2723" text-anchor="end" class="time-cumulative">89.754 ms</text>
+    <text x="110" y="2735" text-anchor="end" class="time-delta">+9.8 μs</text>
+    <text x="550" y="2724" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy H→D (64 B) [192 ns]</text>
+    <line x1="307" y1="2728" x2="793" y2="2728" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="54" onclick="selectEvent(54)">
+    <rect class="row-hitbox" x="0" y="2748" width="1060" height="40"/>
+    <text x="110" y="2763" text-anchor="end" class="time-cumulative">89.764 ms</text>
+    <text x="110" y="2775" text-anchor="end" class="time-delta">+10.4 μs</text>
+    <text x="550" y="2764" text-anchor="middle" class="arrow-label">cudaLaunchKernel [13.968 μs]</text>
+    <line x1="307" y1="2768" x2="793" y2="2768" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="55" onclick="selectEvent(55)">
+    <rect class="row-hitbox" x="0" y="2788" width="1060" height="82"/>
+    <text x="110" y="2824" text-anchor="end" class="time-cumulative">89.774 ms</text>
+    <text x="110" y="2836" text-anchor="end" class="time-delta">+9.6 μs</text>
+    <rect x="625" y="2792" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-max"/>
+    <text x="800" y="2816" text-anchor="middle" class="box-label">single_pass_shmem_aggs_kernel (5.119 ms)</text>
+    <text x="800" y="2830" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;432,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;128,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="2843" text-anchor="middle" class="box-sublabel">dynShmem=5624B; statShmem=16B; regsPerThread=46</text>
+  </g>
+  <g class="event-row" data-idx="56" onclick="selectEvent(56)">
+    <rect class="row-hitbox" x="0" y="2870" width="1060" height="40"/>
+    <text x="110" y="2885" text-anchor="end" class="time-cumulative">89.784 ms</text>
+    <text x="110" y="2897" text-anchor="end" class="time-delta">+10.1 μs</text>
+    <text x="550" y="2886" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (79 B) [5.704 ms]</text>
+    <line x1="307" y1="2890" x2="793" y2="2890" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="57" onclick="selectEvent(57)">
+    <rect class="row-hitbox" x="0" y="2910" width="1060" height="40"/>
+    <text x="110" y="2925" text-anchor="end" class="time-cumulative">95.494 ms</text>
+    <text x="110" y="2937" text-anchor="end" class="time-delta">+5.710 ms</text>
+    <text x="550" y="2926" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (79 B) [17.344 μs]</text>
+    <line x1="307" y1="2930" x2="793" y2="2930" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="58" onclick="selectEvent(58)">
+    <rect class="row-hitbox" x="0" y="2950" width="1060" height="40"/>
+    <text x="110" y="2965" text-anchor="end" class="time-cumulative">95.512 ms</text>
+    <text x="110" y="2977" text-anchor="end" class="time-delta">+17.9 μs</text>
+    <text x="550" y="2966" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (4 B) [3.440 μs]</text>
+    <line x1="307" y1="2970" x2="793" y2="2970" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="59" onclick="selectEvent(59)">
+    <rect class="row-hitbox" x="0" y="2990" width="1060" height="40"/>
+    <text x="110" y="3005" text-anchor="end" class="time-cumulative">95.516 ms</text>
+    <text x="110" y="3017" text-anchor="end" class="time-delta">+3.7 μs</text>
+    <text x="550" y="3006" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (1 KB) [3.200 μs]</text>
+    <line x1="307" y1="3010" x2="793" y2="3010" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="60" onclick="selectEvent(60)">
+    <rect class="row-hitbox" x="0" y="3030" width="1060" height="40"/>
+    <text x="110" y="3045" text-anchor="end" class="time-cumulative">95.519 ms</text>
+    <text x="110" y="3057" text-anchor="end" class="time-delta">+3.5 μs</text>
+    <text x="550" y="3046" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (221 KB) [3.088 μs]</text>
+    <line x1="307" y1="3050" x2="793" y2="3050" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="61" onclick="selectEvent(61)">
+    <rect class="row-hitbox" x="0" y="3070" width="1060" height="40"/>
+    <text x="110" y="3085" text-anchor="end" class="time-cumulative">95.523 ms</text>
+    <text x="110" y="3097" text-anchor="end" class="time-delta">+3.4 μs</text>
+    <text x="550" y="3086" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (400.0 MB) [3.297 ms]</text>
+    <line x1="307" y1="3090" x2="793" y2="3090" stroke="#cc2222" stroke-width="3.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="62" onclick="selectEvent(62)">
+    <rect class="row-hitbox" x="0" y="3110" width="1060" height="40"/>
+    <text x="110" y="3125" text-anchor="end" class="time-cumulative">98.821 ms</text>
+    <text x="110" y="3137" text-anchor="end" class="time-delta">+3.298 ms</text>
+    <text x="550" y="3126" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (4 B) [4.592 μs]</text>
+    <line x1="307" y1="3130" x2="793" y2="3130" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="63" onclick="selectEvent(63)">
+    <rect class="row-hitbox" x="0" y="3150" width="1060" height="82"/>
+    <text x="110" y="3186" text-anchor="end" class="time-cumulative">98.849 ms</text>
+    <text x="110" y="3198" text-anchor="end" class="time-delta">+28.1 μs</text>
+    <rect x="125" y="3154" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="3185" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="3199" text-anchor="middle" class="box-sublabel">4.128 μs</text>
+  </g>
+  <g class="event-row" data-idx="64" onclick="selectEvent(64)">
+    <rect class="row-hitbox" x="0" y="3232" width="1060" height="40"/>
+    <text x="110" y="3247" text-anchor="end" class="time-cumulative">98.861 ms</text>
+    <text x="110" y="3259" text-anchor="end" class="time-delta">+11.4 μs</text>
+    <text x="550" y="3248" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (79 B) [6.864 μs]</text>
+    <line x1="307" y1="3252" x2="793" y2="3252" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="65" onclick="selectEvent(65)">
+    <rect class="row-hitbox" x="0" y="3272" width="1060" height="40"/>
+    <text x="110" y="3287" text-anchor="end" class="time-cumulative">98.869 ms</text>
+    <text x="110" y="3299" text-anchor="end" class="time-delta">+8.1 μs</text>
+    <text x="550" y="3288" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [11.568 μs]</text>
+    <line x1="307" y1="3292" x2="793" y2="3292" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="66" onclick="selectEvent(66)">
+    <rect class="row-hitbox" x="0" y="3312" width="1060" height="40"/>
+    <text x="110" y="3327" text-anchor="end" class="time-cumulative">98.883 ms</text>
+    <text x="110" y="3339" text-anchor="end" class="time-delta">+14.7 μs</text>
+    <text x="550" y="3328" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (16 B) [2.224 μs]</text>
+    <line x1="307" y1="3332" x2="793" y2="3332" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="67" onclick="selectEvent(67)">
+    <rect class="row-hitbox" x="0" y="3352" width="1060" height="40"/>
+    <text x="110" y="3367" text-anchor="end" class="time-cumulative">98.884 ms</text>
+    <text x="110" y="3379" text-anchor="end" class="time-delta">+512 ns</text>
+    <text x="550" y="3368" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy H→D (79 B) [4.480 μs]</text>
+    <line x1="307" y1="3372" x2="793" y2="3372" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="68" onclick="selectEvent(68)">
+    <rect class="row-hitbox" x="0" y="3392" width="1060" height="40"/>
+    <text x="110" y="3407" text-anchor="end" class="time-cumulative">98.887 ms</text>
+    <text x="110" y="3419" text-anchor="end" class="time-delta">+2.9 μs</text>
+    <text x="550" y="3408" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemsetAsync [240 ns]</text>
+    <line x1="307" y1="3412" x2="793" y2="3412" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="69" onclick="selectEvent(69)">
+    <rect class="row-hitbox" x="0" y="3432" width="1060" height="40"/>
+    <text x="110" y="3447" text-anchor="end" class="time-cumulative">98.890 ms</text>
+    <text x="110" y="3459" text-anchor="end" class="time-delta">+3.8 μs</text>
+    <text x="550" y="3448" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (8 B) [1.792 μs]</text>
+    <line x1="307" y1="3452" x2="793" y2="3452" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="70" onclick="selectEvent(70)">
+    <rect class="row-hitbox" x="0" y="3472" width="1060" height="82"/>
+    <text x="110" y="3508" text-anchor="end" class="time-cumulative">98.895 ms</text>
+    <text x="110" y="3520" text-anchor="end" class="time-delta">+4.8 μs</text>
+    <rect x="125" y="3476" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="3507" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="3521" text-anchor="middle" class="box-sublabel">960 ns</text>
+  </g>
+  <g class="event-row" data-idx="71" onclick="selectEvent(71)">
+    <rect class="row-hitbox" x="0" y="3554" width="1060" height="82"/>
+    <text x="110" y="3590" text-anchor="end" class="time-cumulative">98.898 ms</text>
+    <text x="110" y="3602" text-anchor="end" class="time-delta">+2.3 μs</text>
+    <rect x="125" y="3558" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="3589" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="3603" text-anchor="middle" class="box-sublabel">400 ns</text>
+  </g>
+  <g class="event-row" data-idx="72" onclick="selectEvent(72)">
+    <rect class="row-hitbox" x="0" y="3636" width="1060" height="40"/>
+    <text x="110" y="3651" text-anchor="end" class="time-cumulative">98.898 ms</text>
+    <text x="110" y="3663" text-anchor="end" class="time-delta">+560 ns</text>
+    <text x="550" y="3652" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [3.504 μs]</text>
+    <line x1="307" y1="3656" x2="793" y2="3656" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="73" onclick="selectEvent(73)">
+    <rect class="row-hitbox" x="0" y="3676" width="1060" height="40"/>
+    <text x="110" y="3691" text-anchor="end" class="time-cumulative">98.898 ms</text>
+    <text x="110" y="3703" text-anchor="end" class="time-delta">+128 ns</text>
+    <text x="550" y="3692" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy H→D (8 B) [192 ns]</text>
+    <line x1="307" y1="3696" x2="793" y2="3696" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="74" onclick="selectEvent(74)">
+    <rect class="row-hitbox" x="0" y="3716" width="1060" height="40"/>
+    <text x="110" y="3731" text-anchor="end" class="time-cumulative">98.926 ms</text>
+    <text x="110" y="3743" text-anchor="end" class="time-delta">+27.7 μs</text>
+    <text x="550" y="3732" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (1 KB) [1.984 μs]</text>
+    <line x1="307" y1="3736" x2="793" y2="3736" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="75" onclick="selectEvent(75)">
+    <rect class="row-hitbox" x="0" y="3756" width="1060" height="40"/>
+    <text x="110" y="3771" text-anchor="end" class="time-cumulative">102.654 ms</text>
+    <text x="110" y="3783" text-anchor="end" class="time-delta">+3.728 ms</text>
+    <text x="550" y="3772" text-anchor="middle" class="arrow-label">cudaLaunchKernel [1.923 ms]</text>
+    <line x1="307" y1="3776" x2="793" y2="3776" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="76" onclick="selectEvent(76)">
+    <rect class="row-hitbox" x="0" y="3796" width="1060" height="82"/>
+    <text x="110" y="3832" text-anchor="end" class="time-cumulative">104.576 ms</text>
+    <text x="110" y="3844" text-anchor="end" class="time-delta">+1.921 ms</text>
+    <rect x="625" y="3800" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-base"/>
+    <text x="800" y="3824" text-anchor="middle" class="box-label">DeviceScanInitKernel (1.376 μs)</text>
+    <text x="800" y="3838" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;1,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;128,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="3851" text-anchor="middle" class="box-sublabel">regsPerThread=16</text>
+  </g>
+  <g class="event-row" data-idx="77" onclick="selectEvent(77)">
+    <rect class="row-hitbox" x="0" y="3878" width="1060" height="40"/>
+    <text x="110" y="3893" text-anchor="end" class="time-cumulative">104.605 ms</text>
+    <text x="110" y="3905" text-anchor="end" class="time-delta">+29.7 μs</text>
+    <text x="550" y="3894" text-anchor="middle" class="arrow-label">cudaLaunchKernel [6.688 μs]</text>
+    <line x1="307" y1="3898" x2="793" y2="3898" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="78" onclick="selectEvent(78)">
+    <rect class="row-hitbox" x="0" y="3918" width="1060" height="82"/>
+    <text x="110" y="3954" text-anchor="end" class="time-cumulative">104.608 ms</text>
+    <text x="110" y="3966" text-anchor="end" class="time-delta">+2.5 μs</text>
+    <rect x="625" y="3922" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-base"/>
+    <text x="800" y="3946" text-anchor="middle" class="box-label">DeviceScanKernel (10.464 μs)</text>
+    <text x="800" y="3960" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;1,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;224,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="3973" text-anchor="middle" class="box-sublabel">statShmem=21520B; regsPerThread=62</text>
+  </g>
+  <g class="event-row" data-idx="79" onclick="selectEvent(79)">
+    <rect class="row-hitbox" x="0" y="4000" width="1060" height="40"/>
+    <text x="110" y="4015" text-anchor="end" class="time-cumulative">104.615 ms</text>
+    <text x="110" y="4027" text-anchor="end" class="time-delta">+6.9 μs</text>
+    <text x="550" y="4016" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (1 KB) [526.592 μs]</text>
+    <line x1="307" y1="4020" x2="793" y2="4020" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="80" onclick="selectEvent(80)">
+    <rect class="row-hitbox" x="0" y="4040" width="1060" height="40"/>
+    <text x="110" y="4055" text-anchor="end" class="time-cumulative">105.150 ms</text>
+    <text x="110" y="4067" text-anchor="end" class="time-delta">+535.1 μs</text>
+    <text x="550" y="4056" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [23.680 μs]</text>
+    <line x1="307" y1="4060" x2="793" y2="4060" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="81" onclick="selectEvent(81)">
+    <rect class="row-hitbox" x="0" y="4080" width="1060" height="40"/>
+    <text x="110" y="4095" text-anchor="end" class="time-cumulative">105.173 ms</text>
+    <text x="110" y="4107" text-anchor="end" class="time-delta">+23.4 μs</text>
+    <text x="550" y="4096" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy D→H (8 B) [2.560 μs]</text>
+    <line x1="793" y1="4100" x2="307" y2="4100" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="82" onclick="selectEvent(82)">
+    <rect class="row-hitbox" x="0" y="4120" width="1060" height="82"/>
+    <text x="110" y="4156" text-anchor="end" class="time-cumulative">105.174 ms</text>
+    <text x="110" y="4168" text-anchor="end" class="time-delta">+1.2 μs</text>
+    <rect x="125" y="4124" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="4155" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="4169" text-anchor="middle" class="box-sublabel">441.872 μs</text>
+  </g>
+  <g class="event-row" data-idx="83" onclick="selectEvent(83)">
+    <rect class="row-hitbox" x="0" y="4202" width="1060" height="40"/>
+    <text x="110" y="4217" text-anchor="end" class="time-cumulative">105.623 ms</text>
+    <text x="110" y="4229" text-anchor="end" class="time-delta">+448.8 μs</text>
+    <text x="550" y="4218" text-anchor="middle" class="arrow-label">cudaEventRecord [9.472 μs]</text>
+    <line x1="307" y1="4222" x2="793" y2="4222" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="84" onclick="selectEvent(84)">
+    <rect class="row-hitbox" x="0" y="4242" width="1060" height="40"/>
+    <text x="110" y="4257" text-anchor="end" class="time-cumulative">105.638 ms</text>
+    <text x="110" y="4269" text-anchor="end" class="time-delta">+14.5 μs</text>
+    <text x="550" y="4258" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (8 B) [27.280 μs]</text>
+    <line x1="307" y1="4262" x2="793" y2="4262" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="85" onclick="selectEvent(85)">
+    <rect class="row-hitbox" x="0" y="4282" width="1060" height="82"/>
+    <text x="110" y="4318" text-anchor="end" class="time-cumulative">105.674 ms</text>
+    <text x="110" y="4330" text-anchor="end" class="time-delta">+36.0 μs</text>
+    <rect x="125" y="4286" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="4317" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="4331" text-anchor="middle" class="box-sublabel">1.872 μs</text>
+  </g>
+  <g class="event-row" data-idx="86" onclick="selectEvent(86)">
+    <rect class="row-hitbox" x="0" y="4364" width="1060" height="40"/>
+    <text x="110" y="4379" text-anchor="end" class="time-cumulative">105.677 ms</text>
+    <text x="110" y="4391" text-anchor="end" class="time-delta">+3.0 μs</text>
+    <text x="550" y="4380" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [244.720 μs]</text>
+    <line x1="307" y1="4384" x2="793" y2="4384" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="87" onclick="selectEvent(87)">
+    <rect class="row-hitbox" x="0" y="4404" width="1060" height="40"/>
+    <text x="110" y="4419" text-anchor="end" class="time-cumulative">105.691 ms</text>
+    <text x="110" y="4431" text-anchor="end" class="time-delta">+14.4 μs</text>
+    <text x="550" y="4420" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy D→H (4 B) [3.136 μs]</text>
+    <line x1="793" y1="4424" x2="307" y2="4424" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="88" onclick="selectEvent(88)">
+    <rect class="row-hitbox" x="0" y="4444" width="1060" height="82"/>
+    <text x="110" y="4480" text-anchor="end" class="time-cumulative">105.925 ms</text>
+    <text x="110" y="4492" text-anchor="end" class="time-delta">+234.2 μs</text>
+    <rect x="125" y="4448" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="4479" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="4493" text-anchor="middle" class="box-sublabel">11.312 μs</text>
+  </g>
+  <g class="event-row" data-idx="89" onclick="selectEvent(89)">
+    <rect class="row-hitbox" x="0" y="4526" width="1060" height="40"/>
+    <text x="110" y="4541" text-anchor="end" class="time-cumulative">105.968 ms</text>
+    <text x="110" y="4553" text-anchor="end" class="time-delta">+42.6 μs</text>
+    <text x="550" y="4542" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (3 B) [25.296 μs]</text>
+    <line x1="307" y1="4546" x2="793" y2="4546" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="90" onclick="selectEvent(90)">
+    <rect class="row-hitbox" x="0" y="4566" width="1060" height="40"/>
+    <text x="110" y="4581" text-anchor="end" class="time-cumulative">106.014 ms</text>
+    <text x="110" y="4593" text-anchor="end" class="time-delta">+45.7 μs</text>
+    <text x="550" y="4582" text-anchor="middle" class="arrow-label">cudaLaunchKernel [48.832 μs]</text>
+    <line x1="307" y1="4586" x2="793" y2="4586" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="91" onclick="selectEvent(91)">
+    <rect class="row-hitbox" x="0" y="4606" width="1060" height="82"/>
+    <text x="110" y="4642" text-anchor="end" class="time-cumulative">106.057 ms</text>
+    <text x="110" y="4654" text-anchor="end" class="time-delta">+43.6 μs</text>
+    <rect x="625" y="4610" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-base"/>
+    <text x="800" y="4634" text-anchor="middle" class="box-label">gather_chars_fn_char_parallel (4.928 μs)</text>
+    <text x="800" y="4648" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;1,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;128,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="4661" text-anchor="middle" class="box-sublabel">statShmem=264B; regsPerThread=36</text>
+  </g>
+  <g class="event-row" data-idx="92" onclick="selectEvent(92)">
+    <rect class="row-hitbox" x="0" y="4688" width="1060" height="40"/>
+    <text x="110" y="4703" text-anchor="end" class="time-cumulative">106.071 ms</text>
+    <text x="110" y="4715" text-anchor="end" class="time-delta">+14.1 μs</text>
+    <text x="550" y="4704" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (79 B) [8.464 μs]</text>
+    <line x1="307" y1="4708" x2="793" y2="4708" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="93" onclick="selectEvent(93)">
+    <rect class="row-hitbox" x="0" y="4728" width="1060" height="40"/>
+    <text x="110" y="4743" text-anchor="end" class="time-cumulative">106.096 ms</text>
+    <text x="110" y="4755" text-anchor="end" class="time-delta">+24.2 μs</text>
+    <text x="550" y="4744" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (64 B) [2.816 μs]</text>
+    <line x1="307" y1="4748" x2="793" y2="4748" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="94" onclick="selectEvent(94)">
+    <rect class="row-hitbox" x="0" y="4768" width="1060" height="82"/>
+    <text x="110" y="4804" text-anchor="end" class="time-cumulative">106.101 ms</text>
+    <text x="110" y="4816" text-anchor="end" class="time-delta">+5.6 μs</text>
+    <rect x="125" y="4772" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="4803" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="4817" text-anchor="middle" class="box-sublabel">576 ns</text>
+  </g>
+  <g class="event-row" data-idx="95" onclick="selectEvent(95)">
+    <rect class="row-hitbox" x="0" y="4850" width="1060" height="40"/>
+    <text x="110" y="4865" text-anchor="end" class="time-cumulative">106.106 ms</text>
+    <text x="110" y="4877" text-anchor="end" class="time-delta">+5.2 μs</text>
+    <text x="550" y="4866" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (8 B) [2.432 μs]</text>
+    <line x1="307" y1="4870" x2="793" y2="4870" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="96" onclick="selectEvent(96)">
+    <rect class="row-hitbox" x="0" y="4890" width="1060" height="40"/>
+    <text x="110" y="4905" text-anchor="end" class="time-cumulative">106.109 ms</text>
+    <text x="110" y="4917" text-anchor="end" class="time-delta">+3.1 μs</text>
+    <text x="550" y="4906" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [7.936 μs]</text>
+    <line x1="307" y1="4910" x2="793" y2="4910" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="97" onclick="selectEvent(97)">
+    <rect class="row-hitbox" x="0" y="4930" width="1060" height="40"/>
+    <text x="110" y="4945" text-anchor="end" class="time-cumulative">106.114 ms</text>
+    <text x="110" y="4957" text-anchor="end" class="time-delta">+4.4 μs</text>
+    <text x="550" y="4946" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy H→D (8 B) [224 ns]</text>
+    <line x1="307" y1="4950" x2="793" y2="4950" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="98" onclick="selectEvent(98)">
+    <rect class="row-hitbox" x="0" y="4970" width="1060" height="82"/>
+    <text x="110" y="5006" text-anchor="end" class="time-cumulative">106.120 ms</text>
+    <text x="110" y="5018" text-anchor="end" class="time-delta">+5.7 μs</text>
+    <rect x="125" y="4974" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="5005" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="5019" text-anchor="middle" class="box-sublabel">768 ns</text>
+  </g>
+  <g class="event-row" data-idx="99" onclick="selectEvent(99)">
+    <rect class="row-hitbox" x="0" y="5052" width="1060" height="40"/>
+    <text x="110" y="5067" text-anchor="end" class="time-cumulative">106.121 ms</text>
+    <text x="110" y="5079" text-anchor="end" class="time-delta">+1.9 μs</text>
+    <text x="550" y="5068" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (143 B) [10.368 μs]</text>
+    <line x1="307" y1="5072" x2="793" y2="5072" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="100" onclick="selectEvent(100)">
+    <rect class="row-hitbox" x="0" y="5092" width="1060" height="40"/>
+    <text x="110" y="5107" text-anchor="end" class="time-cumulative">106.132 ms</text>
+    <text x="110" y="5119" text-anchor="end" class="time-delta">+10.6 μs</text>
+    <text x="550" y="5108" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy H→D (128 B) [192 ns]</text>
+    <line x1="307" y1="5112" x2="793" y2="5112" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="101" onclick="selectEvent(101)">
+    <rect class="row-hitbox" x="0" y="5132" width="1060" height="40"/>
+    <text x="110" y="5147" text-anchor="end" class="time-cumulative">106.133 ms</text>
+    <text x="110" y="5159" text-anchor="end" class="time-delta">+960 ns</text>
+    <text x="550" y="5148" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [2.336 μs]</text>
+    <line x1="307" y1="5152" x2="793" y2="5152" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="102" onclick="selectEvent(102)">
+    <rect class="row-hitbox" x="0" y="5172" width="1060" height="40"/>
+    <text x="110" y="5187" text-anchor="end" class="time-cumulative">106.137 ms</text>
+    <text x="110" y="5199" text-anchor="end" class="time-delta">+3.6 μs</text>
+    <text x="550" y="5188" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMalloc (4 B) [2.176 μs]</text>
+    <line x1="307" y1="5192" x2="793" y2="5192" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="103" onclick="selectEvent(103)">
+    <rect class="row-hitbox" x="0" y="5212" width="1060" height="40"/>
+    <text x="110" y="5227" text-anchor="end" class="time-cumulative">106.139 ms</text>
+    <text x="110" y="5239" text-anchor="end" class="time-delta">+2.9 μs</text>
+    <text x="550" y="5228" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemsetAsync [5.888 μs]</text>
+    <line x1="307" y1="5232" x2="793" y2="5232" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="104" onclick="selectEvent(104)">
+    <rect class="row-hitbox" x="0" y="5252" width="1060" height="40"/>
+    <text x="110" y="5267" text-anchor="end" class="time-cumulative">106.142 ms</text>
+    <text x="110" y="5279" text-anchor="end" class="time-delta">+2.6 μs</text>
+    <text x="550" y="5268" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memset (4 B) [192 ns]</text>
+    <line x1="307" y1="5272" x2="793" y2="5272" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="105" onclick="selectEvent(105)">
+    <rect class="row-hitbox" x="0" y="5292" width="1060" height="40"/>
+    <text x="110" y="5307" text-anchor="end" class="time-cumulative">106.148 ms</text>
+    <text x="110" y="5319" text-anchor="end" class="time-delta">+6.1 μs</text>
+    <text x="550" y="5308" text-anchor="middle" class="arrow-label">cudaLaunchKernel [10.928 μs]</text>
+    <line x1="307" y1="5312" x2="793" y2="5312" stroke="#666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed)"/>
+  </g>
+  <g class="event-row" data-idx="106" onclick="selectEvent(106)">
+    <rect class="row-hitbox" x="0" y="5332" width="1060" height="82"/>
+    <text x="110" y="5368" text-anchor="end" class="time-cumulative">106.156 ms</text>
+    <text x="110" y="5380" text-anchor="end" class="time-delta">+8.0 μs</text>
+    <rect x="625" y="5336" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-base"/>
+    <text x="800" y="5360" text-anchor="middle" class="box-label">valid_if_n_kernel (2.592 μs)</text>
+    <text x="800" y="5374" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;1,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;256,1,1&gt;&gt;&gt;</text>
+    <text x="800" y="5387" text-anchor="middle" class="box-sublabel">statShmem=128B; regsPerThread=21</text>
+  </g>
+  <g class="event-row" data-idx="107" onclick="selectEvent(107)">
+    <rect class="row-hitbox" x="0" y="5414" width="1060" height="82"/>
+    <text x="110" y="5450" text-anchor="end" class="time-cumulative">106.160 ms</text>
+    <text x="110" y="5462" text-anchor="end" class="time-delta">+3.4 μs</text>
+    <rect x="125" y="5418" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="5449" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="5463" text-anchor="middle" class="box-sublabel">249.984 μs</text>
+  </g>
+  <g class="event-row" data-idx="108" onclick="selectEvent(108)">
+    <rect class="row-hitbox" x="0" y="5496" width="1060" height="40"/>
+    <text x="110" y="5511" text-anchor="end" class="time-cumulative">106.414 ms</text>
+    <text x="110" y="5523" text-anchor="end" class="time-delta">+254.1 μs</text>
+    <text x="550" y="5512" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaMemcpyAsync [32.400 μs]</text>
+    <line x1="307" y1="5516" x2="793" y2="5516" stroke="#cc6666" stroke-width="1.0" stroke-dasharray="5 3" marker-end="url(#arrowhead-dashed-red)"/>
+  </g>
+  <g class="event-row" data-idx="109" onclick="selectEvent(109)">
+    <rect class="row-hitbox" x="0" y="5536" width="1060" height="40"/>
+    <text x="110" y="5551" text-anchor="end" class="time-cumulative">106.436 ms</text>
+    <text x="110" y="5563" text-anchor="end" class="time-delta">+22.0 μs</text>
+    <text x="550" y="5552" text-anchor="middle" class="arrow-label" style="fill:#cc2222">Memcpy D→H (4 B) [1.376 μs]</text>
+    <line x1="793" y1="5556" x2="307" y2="5556" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="110" onclick="selectEvent(110)">
+    <rect class="row-hitbox" x="0" y="5576" width="1060" height="82"/>
+    <text x="110" y="5612" text-anchor="end" class="time-cumulative">106.447 ms</text>
+    <text x="110" y="5624" text-anchor="end" class="time-delta">+11.0 μs</text>
+    <rect x="125" y="5580" width="350" height="74" rx="2" fill="#fdf3dc" stroke="#b08840" stroke-width="1" class="note-box host-note"/>
+    <text x="300" y="5611" text-anchor="middle" class="box-label">cudaStreamSynchronize</text>
+    <text x="300" y="5625" text-anchor="middle" class="box-sublabel">1.600 μs</text>
+  </g>
+  <g class="event-row" data-idx="111" onclick="selectEvent(111)">
+    <rect class="row-hitbox" x="0" y="5658" width="1060" height="40"/>
+    <text x="110" y="5673" text-anchor="end" class="time-cumulative">106.454 ms</text>
+    <text x="110" y="5685" text-anchor="end" class="time-delta">+7.4 μs</text>
+    <text x="550" y="5674" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (4 B) [19.056 μs]</text>
+    <line x1="307" y1="5678" x2="793" y2="5678" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="112" onclick="selectEvent(112)">
+    <rect class="row-hitbox" x="0" y="5698" width="1060" height="40"/>
+    <text x="110" y="5713" text-anchor="end" class="time-cumulative">106.475 ms</text>
+    <text x="110" y="5725" text-anchor="end" class="time-delta">+20.9 μs</text>
+    <text x="550" y="5714" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (143 B) [3.376 μs]</text>
+    <line x1="307" y1="5718" x2="793" y2="5718" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="113" onclick="selectEvent(113)">
+    <rect class="row-hitbox" x="0" y="5738" width="1060" height="40"/>
+    <text x="110" y="5753" text-anchor="end" class="time-cumulative">106.479 ms</text>
+    <text x="110" y="5765" text-anchor="end" class="time-delta">+4.3 μs</text>
+    <text x="550" y="5754" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (8 B) [2.368 μs]</text>
+    <line x1="307" y1="5758" x2="793" y2="5758" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="114" onclick="selectEvent(114)">
+    <rect class="row-hitbox" x="0" y="5778" width="1060" height="40"/>
+    <text x="110" y="5793" text-anchor="end" class="time-cumulative">106.483 ms</text>
+    <text x="110" y="5805" text-anchor="end" class="time-delta">+4.0 μs</text>
+    <text x="550" y="5794" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (400.0 MB) [2.715 ms]</text>
+    <line x1="307" y1="5798" x2="793" y2="5798" stroke="#cc2222" stroke-width="3.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="115" onclick="selectEvent(115)">
+    <rect class="row-hitbox" x="0" y="5818" width="1060" height="40"/>
+    <text x="110" y="5833" text-anchor="end" class="time-cumulative">109.199 ms</text>
+    <text x="110" y="5845" text-anchor="end" class="time-delta">+2.715 ms</text>
+    <text x="550" y="5834" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (800.0 MB) [5.104 ms]</text>
+    <line x1="307" y1="5838" x2="793" y2="5838" stroke="#cc2222" stroke-width="3.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+  <g class="event-row" data-idx="116" onclick="selectEvent(116)">
+    <rect class="row-hitbox" x="0" y="5858" width="1060" height="40"/>
+    <text x="110" y="5873" text-anchor="end" class="time-cumulative">114.307 ms</text>
+    <text x="110" y="5885" text-anchor="end" class="time-delta">+5.108 ms</text>
+    <text x="550" y="5874" text-anchor="middle" class="arrow-label" style="fill:#cc2222">cudaFree (143 B) [6.912 μs]</text>
+    <line x1="307" y1="5878" x2="793" y2="5878" stroke="#cc2222" stroke-width="1.0" marker-end="url(#arrowhead-solid-red)"/>
+  </g>
+</svg></div>
+    </div>
+  </div>
+  <div id="info-panel">
+        <section id="summary">
+            <h3>Summary</h3>
+            <p>
+                Sequence diagram of a single <code>groupby + SUM</code> call on 100&nbsp;M rows (Nsight Systems capture).
+                Each row is one CUDA event — kernel launch, API call, or memory operation — in chronological order.
+                <b>Timeline</b>: cumulative offset from first event + delta from previous row.
+                <b>Host (CPU)</b>: solid arrows = blocking calls; dashed = async.
+                Amber boxes = sync points. Blue boxes = GPU kernels.
+                Click any row to populate the table below.
+            </p>
+        </section>
+        <section id="trace-stats"><h3>Trace statistics</h3><div class="stats-grid"><div class="stat-group"><h4>Overall</h4><div class="stat-row"><span>Visible events</span><strong>117</strong></div><div class="stat-row"><span>GPU active time</span><strong>17.519 ms</strong></div><div class="stat-row"><span>CUDA Api</span><strong>89 / 99.484 ms</strong></div></div><div class="stat-group"><h4>Kernels</h4><div class="stat-row"><span>Kernel launches</span><strong>13 / 17.484 ms</strong></div><div class="stat-row"><span>Slowest kernel</span><strong>single_pass_shmem_aggs_kernel / 5.119 ms</strong></div></div><div class="stat-group"><h4>Memory allocation</h4><div class="stat-row"><span>Alloc requests</span><strong>23 / 2.00 GB / 57.613 ms</strong></div><div class="stat-row"><span>Free requests</span><strong>19 / 2.00 GB / 20.326 ms</strong></div></div><div class="stat-group"><h4>Memory transfers</h4><div class="stat-row"><span>Memcpy payload</span><strong>13 / 511 B / 33.7 μs</strong></div><div class="stat-row"><span>Memset payload</span><strong>2 / 8 B / 960 ns</strong></div></div></div><p class="stats-note">Allocation/free bytes come from cudaMalloc/cudaFree API records. Memcpy/memset bytes are explicit CUDA payload records only; kernel DRAM traffic is not included.</p></section>
+        <section id="top-kernels"><h3>Top slow kernels</h3><table><thead><tr><th>#</th><th>Heat</th><th>Kernel</th><th>Duration</th><th>Share</th></tr></thead><tbody><tr><td>1</td><td><span class="duration-chip table-chip max">slowest</span></td><td>single_pass_shmem_aggs_kernel</td><td>5.119 ms</td><td>29.3%</td></tr><tr><td>2</td><td><span class="duration-chip table-chip p90">slow</span></td><td>mapping_indices_kernel</td><td>4.784 ms</td><td>27.4%</td></tr><tr><td>3</td><td><span class="duration-chip table-chip p75">slower</span></td><td>static_kernel</td><td>4.105 ms</td><td>23.5%</td></tr><tr><td>4</td><td><span class="duration-chip table-chip p75">slower</span></td><td>DeviceSelectSweepKernel</td><td>3.439 ms</td><td>19.7%</td></tr><tr><td>5</td><td><span class="duration-chip table-chip base">baseline</span></td><td>DeviceScanKernel</td><td>10.5 μs</td><td>0.1%</td></tr></tbody></table></section>
+        <section id="duration-legend" aria-label="Kernel duration heatmap legend"><h3>Heatmap legend</h3><ul><li><span class="duration-chip max">slowest (max, 5.119 ms)</span></li><li><span class="duration-chip p97">very slow (p97-max, [5.119 ms, 5.119 ms])</span></li><li><span class="duration-chip p90">slow (p90-p97, [4.784 ms, 5.119 ms])</span></li><li><span class="duration-chip p75">slower (p75-p90, [3.439 ms, 4.784 ms])</span></li><li><span class="duration-chip base">baseline (&lt; p75, (0, 3.439 ms])</span></li></ul></section>
+    <h3 id="detail-heading">Event details</h3>
+    <span class="placeholder" id="info-placeholder">No event selected.</span>
+  </div>
+</div>
+<script>
+const allEvents = [{"Start_ns": "1720762256", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.720762256s", "Duration": "5.408 μs", "Duration_ns": "5408", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14257", "FullName": ""}, {"Start_ns": "1720772672", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.720772672s", "Duration": "279.056 μs", "Duration_ns": "279056", "Bytes": "143", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14261", "FullName": ""}, {"Start_ns": "1721059344", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.721059344s", "Duration": "16.912 μs", "Duration_ns": "16912", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14262", "FullName": ""}, {"Start_ns": "1721079392", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Host-to-Device)", "APIVersion": "", "ShortName": "Memcpy (Host-to-Device)", "Start": "1.721079392s", "Duration": "4.128 μs", "Duration_ns": "4128", "Bytes": "128", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14262", "FullName": ""}, {"Start_ns": "1721085552", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.721085552s", "Duration": "22.911 ms", "Duration_ns": "22911072", "Bytes": "800000000", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14271", "FullName": ""}, {"Start_ns": "1747206768", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.747206768s", "Duration": "1.470 ms", "Duration_ns": "1470000", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14279", "FullName": ""}, {"Start_ns": "1748676448", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cub::detail::for_each", "Name": "static_kernel", "APIVersion": "", "ShortName": "static_kernel", "Start": "1.748676448s", "Duration": "4.105 ms", "Duration_ns": "4104832", "Bytes": "", "Grid": "390625,1,1", "Block": "256,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "regsPerThread=16; corrId=14279", "FullName": "void cub::detail::for_each::static_kernel<cub::detail::for_each::policy_hub_t::policy_500_t, long, cuco::detail::initialize_functor<long, int>>(T2, T3)"}, {"Start_ns": "1748683872", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.748683872s", "Duration": "5.526 ms", "Duration_ns": "5525792", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14284", "FullName": ""}, {"Start_ns": "1754292736", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.754292736s", "Duration": "44.304 μs", "Duration_ns": "44304", "Bytes": "4", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14288", "FullName": ""}, {"Start_ns": "1754338752", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.754338752s", "Duration": "18.512 μs", "Duration_ns": "18512", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14289", "FullName": ""}, {"Start_ns": "1754352032", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Host-to-Device)", "APIVersion": "", "ShortName": "Memcpy (Host-to-Device)", "Start": "1.754352032s", "Duration": "3.264 μs", "Duration_ns": "3264", "Bytes": "4", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14289", "FullName": ""}, {"Start_ns": "1760395568", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.760395568s", "Duration": "11.266 ms", "Duration_ns": "11265840", "Bytes": "400000000", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14300", "FullName": ""}, {"Start_ns": "1771666880", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.771666880s", "Duration": "10.672 μs", "Duration_ns": "10672", "Bytes": "221184", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14304", "FullName": ""}, {"Start_ns": "1771694496", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.771694496s", "Duration": "44.320 μs", "Duration_ns": "44320", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14313", "FullName": ""}, {"Start_ns": "1771740224", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cub::detail::for_each", "Name": "static_kernel", "APIVersion": "", "ShortName": "static_kernel", "Start": "1.771740224s", "Duration": "3.840 μs", "Duration_ns": "3840", "Bytes": "", "Grid": "108,1,1", "Block": "256,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "regsPerThread=16; corrId=14313", "FullName": "void cub::detail::for_each::static_kernel<cub::detail::for_each::policy_hub_t::policy_500_t, long, thrust::cuda_cub::__uninitialized_fill::functor<int *, int>>(T2, T3)"}, {"Start_ns": "1771741280", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.771741280s", "Duration": "2.848 μs", "Duration_ns": "2848", "Bytes": "1728", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14323", "FullName": ""}, {"Start_ns": "1771744816", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.771744816s", "Duration": "3.872 μs", "Duration_ns": "3872", "Bytes": "4", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14327", "FullName": ""}, {"Start_ns": "1771749760", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemsetAsync", "APIVersion": "v3020", "ShortName": "cudaMemsetAsync", "Start": "1.771749760s", "Duration": "7.376 μs", "Duration_ns": "7376", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14328", "FullName": ""}, {"Start_ns": "1771753792", "NVTXLabel": "libcudf:aggregate", "Type": "memset", "Namespace": "", "Name": "Memset", "APIVersion": "", "ShortName": "Memset", "Start": "1.771753792s", "Duration": "768 ns", "Duration_ns": "768", "Bytes": "4", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14328", "FullName": ""}, {"Start_ns": "1771758544", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.771758544s", "Duration": "6.048 μs", "Duration_ns": "6048", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14330", "FullName": ""}, {"Start_ns": "1771761376", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cudf::groupby::detail::hash", "Name": "mapping_indices_kernel", "APIVersion": "", "ShortName": "mapping_indices_kernel", "Start": "1.771761376s", "Duration": "4.784 ms", "Duration_ns": "4783776", "Bytes": "", "Grid": "432,1,1", "Block": "128,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "statShmem=1984B; regsPerThread=56; corrId=14330", "FullName": "void cudf::groupby::detail::hash::mapping_indices_kernel<cuco::static_set_ref<int, (cuda::std::__4::thread_scope)1, cudf::detail::row::equality::device_row_comparator<(bool)0, cudf::nullate::DYNAMIC, cudf::detail::row::equality::nan_equal_physical_equality_comparator>, cuco::linear_probing<(int)1, cudf::groupby::detail::hash::row_hasher_with_cache_t>, cuco::bucket_storage_ref<int, (int)1, cuco::valid_extent<long, (unsigned long)18446744073709551615>>, cuco::op::insert_and_find_tag>>(int, T1, const unsigned int *, int *, int *, int *, cuda::std::__4::atomic_flag *)"}, {"Start_ns": "1771765600", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.771765600s", "Duration": "5.313 ms", "Duration_ns": "5312816", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14331", "FullName": ""}, {"Start_ns": "1776555136", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Device-to-Host)", "APIVersion": "", "ShortName": "Memcpy (Device-to-Host)", "Start": "1.776555136s", "Duration": "5.952 μs", "Duration_ns": "5952", "Bytes": "4", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14331", "FullName": ""}, {"Start_ns": "1777079296", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.777079296s", "Duration": "2.912 μs", "Duration_ns": "2912", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14332", "FullName": ""}, {"Start_ns": "1777094720", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.777094720s", "Duration": "11.502 ms", "Duration_ns": "11501824", "Bytes": "400000000", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14335", "FullName": ""}, {"Start_ns": "1788600384", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.788600384s", "Duration": "10.992 μs", "Duration_ns": "10992", "Bytes": "8", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14336", "FullName": ""}, {"Start_ns": "1788618288", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.788618288s", "Duration": "3.200 μs", "Duration_ns": "3200", "Bytes": "278783", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14346", "FullName": ""}, {"Start_ns": "1788630080", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.788630080s", "Duration": "45.376 μs", "Duration_ns": "45376", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14358", "FullName": ""}, {"Start_ns": "1788683664", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.788683664s", "Duration": "18.256 μs", "Duration_ns": "18256", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14365", "FullName": ""}, {"Start_ns": "1788691008", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cub::detail::scan", "Name": "DeviceCompactInitKernel", "APIVersion": "", "ShortName": "DeviceCompactInitKernel", "Start": "1.788691008s", "Duration": "2.848 μs", "Duration_ns": "2848", "Bytes": "", "Grid": "272,1,1", "Block": "128,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "regsPerThread=16; corrId=14358", "FullName": "void cub::detail::scan::DeviceCompactInitKernel<cub::ScanTileState<int, (bool)1>, long *>(T1, int, T2)"}, {"Start_ns": "1788698752", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cub::detail::select", "Name": "DeviceSelectSweepKernel", "APIVersion": "", "ShortName": "DeviceSelectSweepKernel", "Start": "1.788698752s", "Duration": "3.439 ms", "Duration_ns": "3439008", "Bytes": "", "Grid": "34723,1,1", "Block": "384,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "statShmem=23040B; regsPerThread=56; corrId=14365", "FullName": "void cub::detail::select::DeviceSelectSweepKernel<cub::detail::select::policy_hub<int, cub::NullType, int, (bool)0, (cub::SelectImpl)0>::Policy1000, thrust::transform_iterator<cuco::detail::open_addressing_ns::get_slot<(bool)0, cuco::bucket_storage_ref<int, (int)1, cuco::valid_extent<long, (unsigned long)18446744073709551615>>>, thrust::counting_iterator<long, thrust::use_default, thrust::use_default, thrust::use_default, thrust::compile_time_value<(int)1>>, thrust::use_default, thrust::use_default>, cub::NullType *, int *, long *, cub::ScanTileState<int, (bool)1>, cuco::detail::open_addressing_ns::slot_is_filled<(bool)0, int>, cub::NullType, int, cub::detail::select::streaming_context_t<long, (bool)1>, (cub::SelectImpl)0>(T2, T3, T4, T5, T6, T7, T8, T9, int, T10, cub::detail::vsmem_t)"}, {"Start_ns": "1788703664", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.788703664s", "Duration": "4.657 ms", "Duration_ns": "4656512", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14371", "FullName": ""}, {"Start_ns": "1792142112", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Device-to-Host)", "APIVersion": "", "ShortName": "Memcpy (Device-to-Host)", "Start": "1.792142112s", "Duration": "5.312 μs", "Duration_ns": "5312", "Bytes": "8", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14371", "FullName": ""}, {"Start_ns": "1793496560", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cuStreamSynchronize", "APIVersion": "", "ShortName": "cuStreamSynchronize", "Start": "1.793496560s", "Duration": "9.136 μs", "Duration_ns": "9136", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14375", "FullName": ""}, {"Start_ns": "1793509920", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.793509920s", "Duration": "43.600 μs", "Duration_ns": "43600", "Bytes": "278783", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14376", "FullName": ""}, {"Start_ns": "1793553760", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.793553760s", "Duration": "6.160 μs", "Duration_ns": "6160", "Bytes": "8", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14377", "FullName": ""}, {"Start_ns": "1793566320", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.793566320s", "Duration": "11.463 ms", "Duration_ns": "11463088", "Bytes": "400000000", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14381", "FullName": ""}, {"Start_ns": "1806098704", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.806098704s", "Duration": "19.712 μs", "Duration_ns": "19712", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14395", "FullName": ""}, {"Start_ns": "1806119296", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cub::detail::transform", "Name": "transform_kernel", "APIVersion": "", "ShortName": "transform_kernel", "Start": "1.806119296s", "Duration": "5.568 μs", "Duration_ns": "5568", "Bytes": "", "Grid": "1,1,1", "Block": "256,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "regsPerThread=34; corrId=14395", "FullName": "void cub::detail::transform::transform_kernel<cub::detail::transform::policy_hub<(bool)0, (bool)1, cuda::std::__4::tuple<thrust::counting_iterator<int, thrust::use_default, thrust::use_default, thrust::use_default, thrust::compile_time_value<(int)1>>>, thrust::permutation_iterator<int *, const int *>>::policy1000, int, cub::detail::transform::always_true_predicate, cuda::__4::__callable_permitting_copied_arguments<cuda::std::__4::identity>, thrust::permutation_iterator<int *, const int *>, thrust::counting_iterator<int, thrust::use_default, thrust::use_default, thrust::use_default, thrust::compile_time_value<(int)1>>>(T2, int, bool, T3, T4, T5, cub::detail::transform::kernel_arg<T6>...)"}, {"Start_ns": "1806204320", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.806204320s", "Duration": "1.078 ms", "Duration_ns": "1078272", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14410", "FullName": ""}, {"Start_ns": "1807274560", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cub::detail::for_each", "Name": "static_kernel", "APIVersion": "", "ShortName": "static_kernel", "Start": "1.807274560s", "Duration": "4.960 μs", "Duration_ns": "4960", "Bytes": "", "Grid": "108,1,1", "Block": "256,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "regsPerThread=16; corrId=14410", "FullName": "void cub::detail::for_each::static_kernel<cub::detail::for_each::policy_hub_t::policy_500_t, int, cub::detail::for_each::op_wrapper_t<int, std::pair<rmm::device_uvector<int>, bool> cudf::groupby::detail::hash::compute_single_pass_aggs<cuco::static_set<int, cuco::extent<long, (unsigned long)18446744073709551615>, (cuda::std::__4::thread_scope)1, cudf::detail::row::equality::device_row_comparator<(bool)0, cudf::nullate::DYNAMIC, cudf::detail::row::equality::nan_equal_physical_equality_comparator>, cuco::linear_probing<(int)1, cudf::groupby::detail::hash::row_hasher_with_cache_t>, rmm::mr::polymorphic_allocator<char>, cuco::storage<(int)1>>>(T1 &, const unsigned int *, cudf::host_span<const cudf::groupby::aggregation_request, (unsigned long)18446744073709551615>, cudf::detail::result_cache *, rmm::cuda_stream_view, rmm::detail::cccl_async_resource_ref<cuda::mr::__4::resource_ref<cuda::mr::__4::device_accessible>>)::[lambda(T1) (instance 1)], thrust::counting_iterator<int, thrust::use_default, thrust::use_default, thrust::use_default, thrust::compile_time_value<(int)1>>>>(T2, T3)"}, {"Start_ns": "1807295136", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.807295136s", "Duration": "2.830 ms", "Duration_ns": "2830448", "Bytes": "400000000", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14418", "FullName": ""}, {"Start_ns": "1810132112", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.810132112s", "Duration": "5.360 μs", "Duration_ns": "5360", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14419", "FullName": ""}, {"Start_ns": "1810142032", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.810142032s", "Duration": "12.416 μs", "Duration_ns": "12416", "Bytes": "79", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14423", "FullName": ""}, {"Start_ns": "1810157376", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.810157376s", "Duration": "11.248 μs", "Duration_ns": "11248", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14424", "FullName": ""}, {"Start_ns": "1810169664", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Host-to-Device)", "APIVersion": "", "ShortName": "Memcpy (Host-to-Device)", "Start": "1.810169664s", "Duration": "2.688 μs", "Duration_ns": "2688", "Bytes": "64", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14424", "FullName": ""}, {"Start_ns": "1810193504", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.810193504s", "Duration": "3.376 μs", "Duration_ns": "3376", "Bytes": "24", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14427", "FullName": ""}, {"Start_ns": "1810198160", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemsetAsync", "APIVersion": "v3020", "ShortName": "cudaMemsetAsync", "Start": "1.810198160s", "Duration": "304 ns", "Duration_ns": "304", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14430", "FullName": ""}, {"Start_ns": "1810230336", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.810230336s", "Duration": "6.736 μs", "Duration_ns": "6736", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14446", "FullName": ""}, {"Start_ns": "1810239520", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cub::detail::transform", "Name": "transform_kernel", "APIVersion": "", "ShortName": "transform_kernel", "Start": "1.810239520s", "Duration": "1.312 μs", "Duration_ns": "1312", "Bytes": "", "Grid": "1,1,1", "Block": "128,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "regsPerThread=32; corrId=14446", "FullName": "void cub::detail::transform::transform_kernel<cub::detail::transform::policy_hub<(bool)0, (bool)1, cuda::std::__4::tuple<>, double *>::policy1000, int, cub::detail::transform::always_true_predicate, thrust::cuda_cub::__return_constant<double>, double *, >(T2, int, bool, T3, T4, T5, cub::detail::transform::kernel_arg<T6>...)"}, {"Start_ns": "1810239680", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.810239680s", "Duration": "211.536 μs", "Duration_ns": "211536", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14452", "FullName": ""}, {"Start_ns": "1810459040", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.810459040s", "Duration": "44.608 μs", "Duration_ns": "44608", "Bytes": "79", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14456", "FullName": ""}, {"Start_ns": "1810506352", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.810506352s", "Duration": "14.144 μs", "Duration_ns": "14144", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14457", "FullName": ""}, {"Start_ns": "1810516128", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Host-to-Device)", "APIVersion": "", "ShortName": "Memcpy (Host-to-Device)", "Start": "1.810516128s", "Duration": "192 ns", "Duration_ns": "192", "Bytes": "64", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14457", "FullName": ""}, {"Start_ns": "1810526544", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.810526544s", "Duration": "13.968 μs", "Duration_ns": "13968", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14459", "FullName": ""}, {"Start_ns": "1810536192", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cudf::groupby::detail", "Name": "hash", "APIVersion": "", "ShortName": "single_pass_shmem_aggs_kernel", "Start": "1.810536192s", "Duration": "5.119 ms", "Duration_ns": "5118944", "Bytes": "", "Grid": "432,1,1", "Block": "128,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "dynShmem=5624B; statShmem=16B; regsPerThread=46; corrId=14459", "FullName": "cudf::groupby::detail::hash::<unnamed>::single_pass_shmem_aggs_kernel(int, const unsigned int *, int *, int *, int *, cudf::table_device_view, cudf::mutable_table_device_view, const cudf::aggregation::Kind *, int, int)"}, {"Start_ns": "1810546256", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.810546256s", "Duration": "5.704 ms", "Duration_ns": "5704224", "Bytes": "79", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14461", "FullName": ""}, {"Start_ns": "1816256432", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.816256432s", "Duration": "17.344 μs", "Duration_ns": "17344", "Bytes": "79", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14463", "FullName": ""}, {"Start_ns": "1816274320", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.816274320s", "Duration": "3.440 μs", "Duration_ns": "3440", "Bytes": "4", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14466", "FullName": ""}, {"Start_ns": "1816278048", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.816278048s", "Duration": "3.200 μs", "Duration_ns": "3200", "Bytes": "1728", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14468", "FullName": ""}, {"Start_ns": "1816281520", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.816281520s", "Duration": "3.088 μs", "Duration_ns": "3088", "Bytes": "221184", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14470", "FullName": ""}, {"Start_ns": "1816284880", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.816284880s", "Duration": "3.297 ms", "Duration_ns": "3297408", "Bytes": "400000000", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14472", "FullName": ""}, {"Start_ns": "1819583280", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.819583280s", "Duration": "4.592 μs", "Duration_ns": "4592", "Bytes": "4", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14474", "FullName": ""}, {"Start_ns": "1819611376", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.819611376s", "Duration": "4.128 μs", "Duration_ns": "4128", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14475", "FullName": ""}, {"Start_ns": "1819622800", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.819622800s", "Duration": "6.864 μs", "Duration_ns": "6864", "Bytes": "79", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14479", "FullName": ""}, {"Start_ns": "1819630928", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.819630928s", "Duration": "11.568 μs", "Duration_ns": "11568", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14480", "FullName": ""}, {"Start_ns": "1819645600", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.819645600s", "Duration": "2.224 μs", "Duration_ns": "2224", "Bytes": "16", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14483", "FullName": ""}, {"Start_ns": "1819646112", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Host-to-Device)", "APIVersion": "", "ShortName": "Memcpy (Host-to-Device)", "Start": "1.819646112s", "Duration": "4.480 μs", "Duration_ns": "4480", "Bytes": "79", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14480", "FullName": ""}, {"Start_ns": "1819648992", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemsetAsync", "APIVersion": "v3020", "ShortName": "cudaMemsetAsync", "Start": "1.819648992s", "Duration": "240 ns", "Duration_ns": "240", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14486", "FullName": ""}, {"Start_ns": "1819652752", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.819652752s", "Duration": "1.792 μs", "Duration_ns": "1792", "Bytes": "8", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14492", "FullName": ""}, {"Start_ns": "1819657584", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.819657584s", "Duration": "960 ns", "Duration_ns": "960", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14493", "FullName": ""}, {"Start_ns": "1819659856", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.819659856s", "Duration": "400 ns", "Duration_ns": "400", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14494", "FullName": ""}, {"Start_ns": "1819660416", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.819660416s", "Duration": "3.504 μs", "Duration_ns": "3504", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14495", "FullName": ""}, {"Start_ns": "1819660544", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Host-to-Device)", "APIVersion": "", "ShortName": "Memcpy (Host-to-Device)", "Start": "1.819660544s", "Duration": "192 ns", "Duration_ns": "192", "Bytes": "8", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14495", "FullName": ""}, {"Start_ns": "1819688208", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.819688208s", "Duration": "1.984 μs", "Duration_ns": "1984", "Bytes": "1279", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14509", "FullName": ""}, {"Start_ns": "1823416464", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.823416464s", "Duration": "1.923 ms", "Duration_ns": "1922688", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14522", "FullName": ""}, {"Start_ns": "1825337792", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cub::detail::scan", "Name": "DeviceScanInitKernel", "APIVersion": "", "ShortName": "DeviceScanInitKernel", "Start": "1.825337792s", "Duration": "1.376 μs", "Duration_ns": "1376", "Bytes": "", "Grid": "1,1,1", "Block": "128,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "regsPerThread=16; corrId=14522", "FullName": "void cub::detail::scan::DeviceScanInitKernel<cub::ScanTileState<long, (bool)1>>(T1, int)"}, {"Start_ns": "1825367488", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.825367488s", "Duration": "6.688 μs", "Duration_ns": "6688", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14534", "FullName": ""}, {"Start_ns": "1825369952", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cub::detail::scan", "Name": "DeviceScanKernel", "APIVersion": "", "ShortName": "DeviceScanKernel", "Start": "1.825369952s", "Duration": "10.464 μs", "Duration_ns": "10464", "Bytes": "", "Grid": "1,1,1", "Block": "224,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "statShmem=21520B; regsPerThread=62; corrId=14534", "FullName": "void cub::detail::scan::DeviceScanKernel<cub::detail::scan::policy_hub<int, long, long, unsigned int, cuda::std::__4::plus<void>>::Policy1000, thrust::transform_iterator<cudf::strings::detail::string_offsets_fn<thrust::transform_iterator<cuda::__4::__detail::__return_type_wrapper<int, std::unique_ptr<cudf::column, std::default_delete<cudf::column>> cudf::strings::detail::gather<(bool)0, cudf::detail::input_indexalator>(const cudf::strings_column_view &, T2, T2, rmm::cuda_stream_view, rmm::detail::cccl_async_resource_ref<cuda::mr::__4::resource_ref<cuda::mr::__4::device_accessible>>)::[lambda(int) (instance 1)]>, cudf::detail::input_indexalator, thrust::use_default, thrust::use_default>>, thrust::counting_iterator<int, thrust::use_default, thrust::use_default, thrust::use_default, thrust::compile_time_value<(int)1>>, thrust::use_default, thrust::use_default>, cudf::detail::sizes_to_offsets_iterator<int *, long>, cub::ScanTileState<long, (bool)1>, cuda::std::__4::plus<void>, cub::detail::InputValue<long, long *>, unsigned int, long, (bool)0, long>(T2, T3, T4, int, T5, T6, T7)"}, {"Start_ns": "1825376880", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.825376880s", "Duration": "526.592 μs", "Duration_ns": "526592", "Bytes": "1279", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14543", "FullName": ""}, {"Start_ns": "1825911968", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.825911968s", "Duration": "23.680 μs", "Duration_ns": "23680", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14544", "FullName": ""}, {"Start_ns": "1825935392", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Device-to-Host)", "APIVersion": "", "ShortName": "Memcpy (Device-to-Host)", "Start": "1.825935392s", "Duration": "2.560 μs", "Duration_ns": "2560", "Bytes": "8", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14544", "FullName": ""}, {"Start_ns": "1825936560", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.825936560s", "Duration": "441.872 μs", "Duration_ns": "441872", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14545", "FullName": ""}, {"Start_ns": "1826385408", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaEventRecord", "APIVersion": "v3020", "ShortName": "cudaEventRecord", "Start": "1.826385408s", "Duration": "9.472 μs", "Duration_ns": "9472", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14546", "FullName": ""}, {"Start_ns": "1826399952", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.826399952s", "Duration": "27.280 μs", "Duration_ns": "27280", "Bytes": "8", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14548", "FullName": ""}, {"Start_ns": "1826435920", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.826435920s", "Duration": "1.872 μs", "Duration_ns": "1872", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14549", "FullName": ""}, {"Start_ns": "1826438912", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.826438912s", "Duration": "244.720 μs", "Duration_ns": "244720", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14550", "FullName": ""}, {"Start_ns": "1826453280", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Device-to-Host)", "APIVersion": "", "ShortName": "Memcpy (Device-to-Host)", "Start": "1.826453280s", "Duration": "3.136 μs", "Duration_ns": "3136", "Bytes": "4", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14550", "FullName": ""}, {"Start_ns": "1826687504", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.826687504s", "Duration": "11.312 μs", "Duration_ns": "11312", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14551", "FullName": ""}, {"Start_ns": "1826730144", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.826730144s", "Duration": "25.296 μs", "Duration_ns": "25296", "Bytes": "3", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14555", "FullName": ""}, {"Start_ns": "1826775872", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.826775872s", "Duration": "48.832 μs", "Duration_ns": "48832", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14559", "FullName": ""}, {"Start_ns": "1826819424", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cudf::strings::detail", "Name": "gather_chars_fn_char_parallel", "APIVersion": "", "ShortName": "gather_chars_fn_char_parallel", "Start": "1.826819424s", "Duration": "4.928 μs", "Duration_ns": "4928", "Bytes": "", "Grid": "1,1,1", "Block": "128,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "statShmem=264B; regsPerThread=36; corrId=14559", "FullName": "void cudf::strings::detail::gather_chars_fn_char_parallel<(int)32, thrust::transform_iterator<cudf::detail::value_accessor<cudf::string_view>, thrust::counting_iterator<int, thrust::use_default, thrust::use_default, thrust::use_default, thrust::compile_time_value<(int)1>>, thrust::use_default, thrust::use_default>, cudf::detail::input_indexalator>(T2, char *, cudf::detail::input_offsetalator, T3, int)"}, {"Start_ns": "1826833568", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.826833568s", "Duration": "8.464 μs", "Duration_ns": "8464", "Bytes": "79", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14566", "FullName": ""}, {"Start_ns": "1826857760", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.826857760s", "Duration": "2.816 μs", "Duration_ns": "2816", "Bytes": "64", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14569", "FullName": ""}, {"Start_ns": "1826863344", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.826863344s", "Duration": "576 ns", "Duration_ns": "576", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14572", "FullName": ""}, {"Start_ns": "1826868592", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.826868592s", "Duration": "2.432 μs", "Duration_ns": "2432", "Bytes": "8", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14576", "FullName": ""}, {"Start_ns": "1826871648", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.826871648s", "Duration": "7.936 μs", "Duration_ns": "7936", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14577", "FullName": ""}, {"Start_ns": "1826876096", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Host-to-Device)", "APIVersion": "", "ShortName": "Memcpy (Host-to-Device)", "Start": "1.826876096s", "Duration": "224 ns", "Duration_ns": "224", "Bytes": "8", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14577", "FullName": ""}, {"Start_ns": "1826881776", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.826881776s", "Duration": "768 ns", "Duration_ns": "768", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14578", "FullName": ""}, {"Start_ns": "1826883632", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.826883632s", "Duration": "10.368 μs", "Duration_ns": "10368", "Bytes": "143", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14582", "FullName": ""}, {"Start_ns": "1826894272", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Host-to-Device)", "APIVersion": "", "ShortName": "Memcpy (Host-to-Device)", "Start": "1.826894272s", "Duration": "192 ns", "Duration_ns": "192", "Bytes": "128", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14583", "FullName": ""}, {"Start_ns": "1826895232", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.826895232s", "Duration": "2.336 μs", "Duration_ns": "2336", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14583", "FullName": ""}, {"Start_ns": "1826898880", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMalloc", "APIVersion": "v3020", "ShortName": "cudaMalloc", "Start": "1.826898880s", "Duration": "2.176 μs", "Duration_ns": "2176", "Bytes": "4", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14587", "FullName": ""}, {"Start_ns": "1826901744", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemsetAsync", "APIVersion": "v3020", "ShortName": "cudaMemsetAsync", "Start": "1.826901744s", "Duration": "5.888 μs", "Duration_ns": "5888", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14588", "FullName": ""}, {"Start_ns": "1826904320", "NVTXLabel": "libcudf:aggregate", "Type": "memset", "Namespace": "", "Name": "Memset", "APIVersion": "", "ShortName": "Memset", "Start": "1.826904320s", "Duration": "192 ns", "Duration_ns": "192", "Bytes": "4", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14588", "FullName": ""}, {"Start_ns": "1826910400", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaLaunchKernel", "APIVersion": "v7000", "ShortName": "cudaLaunchKernel", "Start": "1.826910400s", "Duration": "10.928 μs", "Duration_ns": "10928", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14591", "FullName": ""}, {"Start_ns": "1826918368", "NVTXLabel": "libcudf:aggregate", "Type": "kernel", "Namespace": "cudf::detail", "Name": "valid_if_n_kernel", "APIVersion": "", "ShortName": "valid_if_n_kernel", "Start": "1.826918368s", "Duration": "2.592 μs", "Duration_ns": "2592", "Bytes": "", "Grid": "1,1,1", "Block": "256,1,1", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "statShmem=128B; regsPerThread=21; corrId=14591", "FullName": "void cudf::detail::valid_if_n_kernel<thrust::counting_iterator<int, thrust::use_default, thrust::use_default, thrust::use_default, thrust::compile_time_value<(int)1>>, thrust::counting_iterator<int, thrust::use_default, thrust::use_default, thrust::use_default, thrust::compile_time_value<(int)1>>, cudf::detail::gather_bitmask_functor<(cudf::detail::gather_bitmask_op)0, cudf::detail::input_indexalator>, (int)256>(T1, T2, T3, unsigned int **, int, int, int *)"}, {"Start_ns": "1826921776", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.826921776s", "Duration": "249.984 μs", "Duration_ns": "249984", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14592", "FullName": ""}, {"Start_ns": "1827175856", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaMemcpyAsync", "APIVersion": "v3020", "ShortName": "cudaMemcpyAsync", "Start": "1.827175856s", "Duration": "32.400 μs", "Duration_ns": "32400", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14593", "FullName": ""}, {"Start_ns": "1827197856", "NVTXLabel": "libcudf:aggregate", "Type": "memcpy", "Namespace": "", "Name": "Memcpy (Device-to-Host)", "APIVersion": "", "ShortName": "Memcpy (Device-to-Host)", "Start": "1.827197856s", "Duration": "1.376 μs", "Duration_ns": "1376", "Bytes": "4", "Grid": "", "Block": "", "Stream": "7", "Device": "GPU 0", "TID": "", "ExtraDetail": "corrId=14593", "FullName": ""}, {"Start_ns": "1827208880", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaStreamSynchronize", "APIVersion": "v3020", "ShortName": "cudaStreamSynchronize", "Start": "1.827208880s", "Duration": "1.600 μs", "Duration_ns": "1600", "Bytes": "", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14594", "FullName": ""}, {"Start_ns": "1827216320", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.827216320s", "Duration": "19.056 μs", "Duration_ns": "19056", "Bytes": "4", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14596", "FullName": ""}, {"Start_ns": "1827237264", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.827237264s", "Duration": "3.376 μs", "Duration_ns": "3376", "Bytes": "143", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14598", "FullName": ""}, {"Start_ns": "1827241520", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.827241520s", "Duration": "2.368 μs", "Duration_ns": "2368", "Bytes": "8", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14600", "FullName": ""}, {"Start_ns": "1827245472", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.827245472s", "Duration": "2.715 ms", "Duration_ns": "2714704", "Bytes": "400000000", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14602", "FullName": ""}, {"Start_ns": "1829960816", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.829960816s", "Duration": "5.104 ms", "Duration_ns": "5103936", "Bytes": "800000000", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14603", "FullName": ""}, {"Start_ns": "1835068800", "NVTXLabel": "libcudf:aggregate", "Type": "cuda api", "Namespace": "", "Name": "cudaFree", "APIVersion": "v3020", "ShortName": "cudaFree", "Start": "1.835068800s", "Duration": "6.912 μs", "Duration_ns": "6912", "Bytes": "143", "Grid": "", "Block": "", "Stream": "", "Device": "", "TID": "281608624021278", "ExtraDetail": "corrId=14607", "FullName": ""}];
+let selectedIdx = -1;
+function selectEvent(i) {
+  if (selectedIdx >= 0) {
+    const prev = document.querySelector('.event-row[data-idx="' + selectedIdx + '"]');
+    if (prev) prev.classList.remove('selected');
+  }
+  selectedIdx = i;
+  const row = document.querySelector('.event-row[data-idx="' + i + '"]');
+  if (row) row.classList.add('selected');
+  const e = allEvents[i];
+  let rows = '';
+  for (const [k, v] of Object.entries(e)) {
+    if (v === '' || v === null || v === undefined) continue;
+    rows += '<tr><td>' + k + '</td><td>' + v + '</td></tr>';
+  }
+  const placeholder = document.getElementById('info-placeholder');
+  if (placeholder) placeholder.remove();
+  let tbl = document.getElementById('info-table');
+  if (!tbl) {
+    tbl = document.createElement('table');
+    tbl.id = 'info-table';
+    document.getElementById('info-panel').appendChild(tbl);
+  }
+  tbl.innerHTML = rows;
+}
+</script>
+</body>
+</html>

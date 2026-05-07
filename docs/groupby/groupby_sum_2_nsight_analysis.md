@@ -167,3 +167,12 @@ This document validates the algorithm described in Part I against a real GPU tra
 > **Only ~15% of the total aggregate wall time is actual GPU kernel execution.** The remaining ~85% (~96.8 ms) is dominated by synchronous memory management — three `cudaMalloc` calls allocating 400 MB each for the hash table and output buffers, plus the corresponding `cudaFree` calls. This is the dominant cost for single-shot workloads and would amortise significantly with buffer reuse across repeated calls.
 
 
+# NCU analysis
+
+```bash
+ncu --set full \
+    --kernel-name-base function \
+    --kernel-name regex:"mapping_indices_kernel|DeviceCompactInitKernel|DeviceSelectSweepKernel|DeviceScanInitKernel|DeviceScanKernel|gather_chars_fn_char_parallel|single_pass_shmem_aggs_kernel" \
+    -o reports/libcudf_groupby_orders_100M_ncu \
+    ./build/libcudf_tpch_orders_groupby --input ./data/orders_100M.parquet
+```

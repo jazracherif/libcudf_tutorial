@@ -2,9 +2,9 @@
 
 Traditional database execution engines were designed for the CPU: optimized for a handful of powerful cores, deep cache hierarchies, and sequential or lightly-vectorized processing. However, as data volumes grow and CPU frequency scaling plateaus, Database researchers have increasingly turned to hardware acceleration. GPUs, with their massive memory bandwidth and thousands of parallel execution units, offer a highly compelling paradigm shift for analytical query performance.
 
-But mapping relational algebra onto GPUs introduces a massive semantic gap. Operators like **joins**, **aggregations**, and **sorts** must be entirely reimagined for a SIMT (Single Instruction, Multiple Thread) architecture. Conventional algorithms natively optimized for CPUs often hit brutal bottlenecks on GPUs due to **thread divergence**, **uncoalesced memory access**, and severe penalties for **global synchronisation**. 
+But mapping relational algebra onto GPUs introduces a massive semantic gap. Operators like **joins**, **aggregations**, and **sorts** must be entirely reimagined for the GPU SIMT (Single Instruction, Multiple Thread) architecture. Conventional algorithms natively optimized for CPUs often hit brutal bottlenecks on GPUs due to **thread divergence**, **uncoalesced memory access**, and severe penalties for **global synchronisation**. 
 
-To bridge this runtime gap, NVIDIA developed **libcudf**: a C++ library implementing foundational DataFrame operations and relational primitives natively on the GPU. It has emerged as the de facto execution framework for a massive portion of the accelerated data ecosystem, underpinning projects like Spark RAPIDS, Dask-cuDF, and numerous independent database research efforts.
+To bridge this runtime gap, NVIDIA developed **libcudf**: a C++ library implementing foundational DataFrame operations and relational primitives natively on the GPU. It has emerged as the de facto execution framework for a massive portion of the accelerated data ecosystem, underpinning projects like `Spark RAPIDS`, `Dask-cuDF`, `Velox CuDF` and numerous independent database research efforts.
 
 The central questions driving this deep technical dive are:
 - **How good is libcudf?** 
@@ -21,32 +21,37 @@ This report was compiled with assistance from AI agents.
 
 `GROUP BY` is one of the foundational physical operators in relational database systems. Its job is to partition an input relation into disjoint subsets (groups) that share the same value for a designated key expression, and then reduce each group to a single output row by applying one or more aggregate functions — `SUM`, `COUNT`, `MIN`, `MAX`, `AVG`, etc.
 
-In a query execution engine the `GROUP BY` physical operator must solve two subproblems simultaneously:
+In a query execution engine the `GROUP BY` physical operator must solve two logical subproblems:
 
 1. **Key partitioning** — determine, for every input row, which output group it belongs to. This is effectively a dictionary-encoding problem: map an arbitrarily-typed key (integer, string, composite) to a dense integer group-id in [0, K) where K is the number of distinct keys.
 
 2. **Aggregation** — reduce all rows assigned to the same group-id to a single scalar per aggregate column (e.g., sum all values from column C for group-id 3).
 
-If the data cannot be stored fully in the main memory, it must be broken up into chunks and the algorithm adapted to handles operating instead of blocks od data incrementally, as they move in and out of memory.
+These two subproblems are algorithm-agnostic: the same logical goals can be achieved via two fundamentally different physical strategies. The **sort-aggregate** approach sorts all rows by key first, after which identical keys are contiguous and can be reduced in a single scan; comparison sort costs $O(n \log n)$, while radix sort can be linear for fixed-width keys. The **hash-aggregate** approach builds a hash table mapping each distinct key to its running accumulator, updating it in expected $O(n)$ time — no sort required, but concurrent writes to shared buckets introduce contention. If the data exceeds available memory, both strategies must be adapted to process it in chunks.
 
-On CPUs this is typically implemented via a **hash table** (hash aggregate) or a **sort** followed by a sequential scan (sort aggregate). The choice between them depends on whether the aggregate function requires ordering and on the expected cardinality of the key column. 
+Both strategies exist on GPU, but porting either from CPU to GPU introduces hardware constraints that shape the implementation. The table below lists the most important ones, ordered by impact:
 
-On GPUs the same two strategies exist, but the implementation constraints are very different:
+| # | Concern | CPU implementation | GPU implementation |
+|---|---------|--------------------|--------------------|
+| 1 | Parallelism unit | A few powerful cores, each with branch prediction, out-of-order execution, and large private caches | Many simple CUDA threads; throughput comes from keeping many warps resident and ready to run, not from making each thread fast |
+| 2 | Memory hierarchy & performance model | L1/L2/L3 caches optimise for latency and are mostly managed by hardware | Fast on-chip shared memory must be managed explicitly; global memory is high-bandwidth but high-latency, so performance depends on coalesced access and latency hiding across warps |
+| 3 | Sort cost (sort-aggregate) | Comparison sort is mature and supports arbitrary key types, but remains $O(n \log n)$ | Radix sort is very fast for fixed-width keys; variable-length strings require indirect comparison/gather work, so sort-aggregate becomes less attractive for this workload |
+| 4 | Atomic contention | A small number of cores contend for shared hash buckets | Thousands of threads may update the same group; atomic read-modify-write operations then serialize, becoming the main hash-aggregate bottleneck |
+| 5 | Warp divergence | Each core follows its own instruction stream | Threads execute in groups of 32 (*warps*). If threads probe different numbers of hash slots, the warp waits for the slowest lane, reducing effective parallelism |
+| 6 | Capacity planning | Dynamic data structures can grow incrementally | Device memory must be provisioned before kernels run. Unknown output sizes require conservative over-allocation or an extra counting pass and host-side allocation before launching the next kernel; this is often more painful for joins than for groupby |
+| 7 | Synchronization model | Lock-based and lock-free data structures are both practical | GPU algorithms rely on hardware atomics and lock-free patterns; for variable-length keys there is no native atomic update, so the algorithm must separate key comparison from fixed-width index/accumulator updates |
+| 8 | Key equality | Comparators can call arbitrary host code | Comparators must be device-callable (`__device__`) and cannot use virtual dispatch or call back to the CPU; strings and composite keys need custom on-device equality logic |
+| 9 | Out-of-memory handling | Database engines can spill partitions or runs to disk when RAM is insufficient | libcudf does not implement operator-level spilling: the hash table, sort buffers, and outputs must fit in GPU memory or the operation fails |
 
-| Concern | CPU hash agg | GPU hash agg |
-|---------|-------------|--------------|
-| Parallelism unit | Core (few, fat) | CUDA thread (thousands, thin) |
-| Atomic contention | Low — few threads touch the same bucket | High — thousands of threads may hash to the same group |
-| Memory hierarchy | L1/L2/L3 cache | Shared memory (fast, 48–96 KB/SM) + global memory (slow, high bandwidth) |
-| Key equality | Arbitrary comparator | Must be expressed as a device-callable functor |
+The central challenges on GPU are **managing atomic contention and warp divergence** during aggregation, **explicitly controlling the memory hierarchy** to maximise bandwidth, and making all key-comparison and synchronisation logic expressible entirely on-device — while still achieving near-linear throughput over hundreds of millions of rows.
 
-The central challenge on GPU is **reducing global atomic contention** for the aggregation step while still achieving near-linear throughput over hundreds of millions of rows.
+In this blog, I break down how libcudf solves these challenges.
 
 ---
 
 ## Scope of This Analysis
 
-This document analyses the **`groupby` + `sum` physical operator in NVIDIA's [libcudf](https://github.com/rapidsai/cudf)** — the GPU dataframe library that underpins the RAPIDS ecosystem and is used by cuDF (Python), Spark-RAPIDS, and Dask-cuDF, among others. The analysis is grounded in a **100 million row workload** (1.8 GB Parquet file) run on a real GPU.
+This document analyses the **`groupby` + `sum` physical operator in NVIDIA's [libcudf](https://github.com/rapidsai/cudf)** — the GPU dataframe library that underpins the RAPIDS ecosystem and is used by cuDF (Python), Spark-RAPIDS, and Dask-cuDF, among others. The analysis is grounded in a **100 million row workload** (1.8 GB Parquet file) run on the DGX Spark workstation, featuring a the GB10 blackwhell with 128GB LPDDRX unified memory with host Arm Cpus
 
 Specifically we trace the exact execution path triggered by the following query:
 
@@ -57,7 +62,7 @@ FROM     orders
 GROUP BY o_orderstatus;
 ```
 
-In C++ with libcudf this is expressed as:
+The below libcudf C++ code is invoked on an ingested table stored in the Apach Arrow format:
 
 ```cpp
 cudf::table_view tv = cudf_table->view() ... // read from arrow parquet file
@@ -78,12 +83,18 @@ The goals are:
 
 - Understand **how libcudf selects and executes the groupby sum path** using a string key and float64 column.
 - Map every GPU kernel launch to its source location in cuDF, [cuCollections](https://github.com/NVIDIA/cuCollections), [Thrust](https://github.com/NVIDIA/cccl), and [CUB](https://github.com/NVIDIA/cccl).
-- **CApture a real run of the algorithm with real Nsight Systems on GB10** — confirm kernel names, ordering, and timing on a 100M-row workload.
+- **Capture a real run of the algorithm with real Nsight Systems on GB10** — confirm kernel names, ordering, and timing on a 100M-row workload.
 - Identify the dominant performance costs and explain the two-level shared-memory aggregation strategy that libcudf uses to reduce global atomic contention.
 
 ## Running the experiment and generating the data
 
 This analysis is based on a 100M-row Parquet file generated by the TPC-H script, meant to reproduce the Orders table. Follow the setup described in the README before running these commands.
+
+**0. Activate the conda environment:**
+
+```bash
+conda activate libcudf-tutorial
+```
 
 **1. Generate 100M rows of TPC-H Orders data:**
 
@@ -116,7 +127,7 @@ ncu --set full \
     ./build/libcudf_tpch_orders_groupby --input data/orders_100M.parquet
 ```
 
-**5. RMM allocation trace (CPU call stack per GPU allocation):**
+**5. View the RMM allocation trace (CPU call stack per GPU allocation):**
 
 ```bash
 ./build/libcudf_tpch_orders_groupby --input data/orders_100M.parquet --rmm-trace
@@ -141,12 +152,12 @@ python scripts/extract_nsys_events.py \
     --nvtx-label "libcudf:aggregate"
 ```
 
-**7. Generate the Host↔Device message flow diagram:**
+**7. Generate the Nsight timeline HTML report:**
 
 ```bash
-python scripts/csv_to_mermaid_flow.py \
+python scripts/csv_to_nsight_html.py \
     docs/groupby/logs/libcudf_groupby_orders_100M_libcudf_aggregate.csv \
-    docs/groupby/logs/nsight_100m_aggregate_flow.md
+    docs/groupby/logs/nsight_100m_aggregate_timeline.html
 ```
 
 ### Libraries under analysis

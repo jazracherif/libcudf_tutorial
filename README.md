@@ -292,6 +292,15 @@ ncu --kernel-name-base function \
     ./build/libcudf_tpch_orders_groupby --input ./data/orders.parquet
 ```
 
+here's an example for the group by kernels
+```bash
+ncu --set full \
+    --kernel-name-base function \
+    --kernel-name regex:"mapping_indices_kernel|DeviceCompactInitKernel|DeviceSelectSweepKernel|DeviceScanInitKernel|DeviceScanKernel|gather_chars_fn_char_parallel|single_pass_shmem_aggs_kernel" \
+    -o reports/libcudf_groupby_orders_ncu \
+    ./build/libcudf_tpch_orders_groupby --input ./data/orders.parquet
+```
+
 ### 5.3 Useful metric sets
 
 | Flag | What it collects |

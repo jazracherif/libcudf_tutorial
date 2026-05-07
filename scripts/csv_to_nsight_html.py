@@ -12,6 +12,13 @@ Arrow style (same logic as csv_to_mermaid_flow.py):
 
 Click any row to see all CSV fields in the detail panel below.
 
+Kernel duration heatmap:
+    Device kernel boxes are coloured by duration percentile within the visible
+    kernel set. Muted blue boxes are the baseline group below the 75th
+    percentile; yellow/orange/red boxes identify increasingly slow kernels. A
+    Top slow kernels table in the right panel ranks the largest contributors by
+    duration.
+
 Usage:
     python scripts/csv_to_nsight_html.py events.csv [output.html]
     python scripts/csv_to_nsight_html.py events.csv out.html --title "My Trace"
@@ -111,6 +118,57 @@ def _clean_extra(extra):
 
 def _trunc(s, n=999):
     return s if len(s) <= n else s[:n - 1] + "\u2026"
+
+
+def _int_or_zero(raw):
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _percentile_threshold(sorted_values, percentile):
+    """Return the nearest-rank percentile threshold for a sorted value list."""
+    if not sorted_values:
+        return 0
+    rank = max(0, min(len(sorted_values) - 1, int(round((percentile / 100) * (len(sorted_values) - 1)))))
+    return sorted_values[rank]
+
+
+def annotate_kernel_duration_buckets(events):
+    """Attach duration_ns and duration_bucket to kernel events for heat colouring."""
+    kernel_events = [ev for ev in events if ev.get("kind") == "note_d"]
+    durations = []
+    for ev in kernel_events:
+        duration_ns = _int_or_zero(ev["csv"].get("Duration_ns"))
+        ev["duration_ns"] = duration_ns
+        durations.append(duration_ns)
+
+    if not durations:
+        return []
+
+    sorted_durations = sorted(durations)
+    p50 = _percentile_threshold(sorted_durations, 50)
+    p75 = _percentile_threshold(sorted_durations, 75)
+    p90 = _percentile_threshold(sorted_durations, 90)
+    p97 = _percentile_threshold(sorted_durations, 97)
+    max_duration = sorted_durations[-1]
+
+    for ev in kernel_events:
+        duration_ns = ev["duration_ns"]
+        if duration_ns == max_duration:
+            bucket = "duration-max"
+        elif duration_ns >= p97:
+            bucket = "duration-p97"
+        elif duration_ns >= p90:
+            bucket = "duration-p90"
+        elif duration_ns >= p75:
+            bucket = "duration-p75"
+        else:
+            bucket = "duration-base"
+        ev["duration_bucket"] = bucket
+
+    return sorted(kernel_events, key=lambda ev: ev.get("duration_ns", 0), reverse=True)
 
 
 # ── Row classifier ────────────────────────────────────────────────────────────
@@ -284,6 +342,10 @@ def _note_lines(ev, row_top_y):
     box_height   = ev["row_h"] - 8
     fill_color   = "#dce8f7" if is_device else "#fdf3dc"
     stroke_color = "#5580aa" if is_device else "#b08840"
+    rect_classes = ["note-box", "device-note" if is_device else "host-note"]
+    if is_device and ev.get("duration_bucket"):
+        rect_classes.append(ev["duration_bucket"])
+    rect_class_attr = " ".join(rect_classes)
     box_mid_y    = box_top_y + box_height // 2
     has_label2   = bool(ev.get("label2"))
     has_label3   = bool(ev.get("label3"))
@@ -298,7 +360,7 @@ def _note_lines(ev, row_top_y):
         label_y, label2_y, label3_y = box_mid_y + 4, None, None
     lines = [
         f'    <rect x="{box_left_x}" y="{box_top_y}" width="{BOX_W}" height="{box_height}"'
-        f' rx="2" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1"/>',
+        f' rx="2" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1" class="{rect_class_attr}"/>',
         f'    <text x="{center_x}" y="{label_y}" text-anchor="middle"'
         f' class="box-label">{_html_escape(ev["label"])}</text>',
     ]
@@ -470,7 +532,181 @@ def build_svg_body(events):
 #   - selectEvent(i) highlights the clicked <g> (.selected class → blue tint) and
 #     renders a two-column <table> of non-empty CSV fields into #info-panel.
 
-def _html_page(title, svg_header, svg_body, events_json):
+def _duration_threshold_ranges(kernel_events):
+    durations = sorted(ev.get("duration_ns", 0) for ev in kernel_events)
+    if not durations:
+        return {"max": "", "p97": "", "p90": "", "p75": "", "base": ""}
+
+    p75 = _percentile_threshold(durations, 75)
+    p90 = _percentile_threshold(durations, 90)
+    p97 = _percentile_threshold(durations, 97)
+    max_duration = durations[-1]
+    return {
+        "max": _fmt_ns(max_duration),
+        "p97": f"[{_fmt_ns(p97)}, {_fmt_ns(max_duration)}]",
+        "p90": f"[{_fmt_ns(p90)}, {_fmt_ns(p97)}]",
+        "p75": f"[{_fmt_ns(p75)}, {_fmt_ns(p90)}]",
+        "base": f"(0, {_fmt_ns(p75)}]",
+    }
+
+
+def _duration_legend_html(kernel_events):
+    bucket_ranges = _duration_threshold_ranges(kernel_events)
+
+    def label(css_class, name, percentile_range):
+        duration_range = bucket_ranges[css_class]
+        suffix = f", {duration_range}" if duration_range else ""
+        text = _html_escape(f"{name} ({percentile_range}{suffix})")
+        return f'<li><span class="duration-chip {css_class}">{text}</span></li>'
+
+    return (
+        '<section id="duration-legend" aria-label="Kernel duration heatmap legend">'
+        '<h3>Heatmap legend</h3>'
+        '<ul>'
+        f'{label("max", "slowest", "max")}'
+        f'{label("p97", "very slow", "p97-max")}'
+        f'{label("p90", "slow", "p90-p97")}'
+        f'{label("p75", "slower", "p75-p90")}'
+        f'{label("base", "baseline", "< p75")}'
+        '</ul>'
+        '</section>'
+    )
+
+
+def _duration_bucket_label(bucket):
+    return {
+        "duration-max": "slowest",
+        "duration-p97": "very slow",
+        "duration-p90": "slow",
+        "duration-p75": "slower",
+        "duration-base": "baseline",
+    }.get(bucket, "")
+
+
+def _trace_stats_html(events, kernel_events):
+    def event_duration(ev):
+        return _int_or_zero(ev["csv"].get("Duration_ns"))
+
+    def event_bytes(ev):
+        return _int_or_zero(ev["csv"].get("Bytes"))
+
+    kernel_count = len(kernel_events)
+    kernel_time_ns = sum(ev.get("duration_ns", event_duration(ev)) for ev in kernel_events)
+
+    memcpy_events = [ev for ev in events if ev["csv"].get("Type", "").strip() == "memcpy"]
+    memcpy_count = len(memcpy_events)
+    memcpy_time_ns = sum(event_duration(ev) for ev in memcpy_events)
+    memcpy_bytes = sum(event_bytes(ev) for ev in memcpy_events)
+
+    memset_events = [ev for ev in events if ev["csv"].get("Type", "").strip() == "memset"]
+    memset_count = len(memset_events)
+    memset_time_ns = sum(event_duration(ev) for ev in memset_events)
+    memset_bytes = sum(event_bytes(ev) for ev in memset_events)
+
+    allocation_events = [
+        ev for ev in events
+        if ev["csv"].get("Type", "").strip() == "cuda api"
+        and ev["csv"].get("Name", "").strip() in {"cudaMalloc", "cudaMallocHost", "cudaMallocManaged", "cudaMallocPitch"}
+    ]
+    allocation_count = len(allocation_events)
+    allocation_time_ns = sum(event_duration(ev) for ev in allocation_events)
+    allocation_bytes = sum(event_bytes(ev) for ev in allocation_events)
+
+    free_events = [
+        ev for ev in events
+        if ev["csv"].get("Type", "").strip() == "cuda api"
+        and ev["csv"].get("Name", "").strip() in {"cudaFree", "cudaFreeHost"}
+    ]
+    free_count = len(free_events)
+    free_time_ns = sum(event_duration(ev) for ev in free_events)
+    free_bytes = sum(event_bytes(ev) for ev in free_events)
+
+    cuda_api_events = [ev for ev in events if ev["csv"].get("Type", "").strip() == "cuda api"]
+    cuda_api_count = len(cuda_api_events)
+    cuda_api_time_ns = sum(event_duration(ev) for ev in cuda_api_events)
+
+    gpu_active_time_ns = kernel_time_ns + memcpy_time_ns + memset_time_ns
+    slowest_kernel = kernel_events[0] if kernel_events else None
+    slowest_kernel_name = "-"
+    slowest_kernel_duration = "-"
+    if slowest_kernel:
+        slowest_kernel_name = _trunc(
+            slowest_kernel["csv"].get("ShortName") or slowest_kernel["csv"].get("Name") or "kernel",
+            38,
+        )
+        slowest_kernel_duration = _fmt_ns(slowest_kernel.get("duration_ns", 0))
+
+    groups = [
+        ("Overall", [
+            ("Visible events", str(len(events))),
+            ("GPU active time", _fmt_ns(gpu_active_time_ns)),
+            ("CUDA Api", f"{cuda_api_count} / {_fmt_ns(cuda_api_time_ns)}"),
+        ]),
+        ("Kernels", [
+            ("Kernel launches", f"{kernel_count} / {_fmt_ns(kernel_time_ns)}"),
+            ("Slowest kernel", f"{_html_escape(slowest_kernel_name)} / {_html_escape(slowest_kernel_duration)}"),
+        ]),
+        ("Memory allocation", [
+            ("Alloc requests", f"{allocation_count} / {_fmt_bytes(allocation_bytes)} / {_fmt_ns(allocation_time_ns)}"),
+            ("Free requests", f"{free_count} / {_fmt_bytes(free_bytes)} / {_fmt_ns(free_time_ns)}"),
+        ]),
+        ("Memory transfers", [
+            ("Memcpy payload", f"{memcpy_count} / {_fmt_bytes(memcpy_bytes)} / {_fmt_ns(memcpy_time_ns)}"),
+            ("Memset payload", f"{memset_count} / {_fmt_bytes(memset_bytes)} / {_fmt_ns(memset_time_ns)}"),
+        ]),
+    ]
+
+    items = "".join(
+        '<div class="stat-group">'
+        f'<h4>{_html_escape(group_label)}</h4>'
+        + "".join(
+            f'<div class="stat-row"><span>{_html_escape(label)}</span><strong>{value}</strong></div>'
+            for label, value in rows
+        )
+        + '</div>'
+        for group_label, rows in groups
+    )
+    return (
+        '<section id="trace-stats">'
+        '<h3>Trace statistics</h3>'
+        f'<div class="stats-grid">{items}</div>'
+        '<p class="stats-note">Allocation/free bytes come from cudaMalloc/cudaFree API records. Memcpy/memset bytes are explicit CUDA payload records only; kernel DRAM traffic is not included.</p>'
+        '</section>'
+    )
+
+
+def _top_kernels_html(kernel_events, limit=5):
+    if not kernel_events:
+        return ""
+    total_ns = sum(ev.get("duration_ns", 0) for ev in kernel_events)
+    rows = []
+    for idx, ev in enumerate(kernel_events[:limit], start=1):
+        duration_ns = ev.get("duration_ns", 0)
+        share = (duration_ns / total_ns * 100) if total_ns else 0
+        name = ev["csv"].get("ShortName") or ev["csv"].get("Name") or ev.get("label", "")
+        bucket = ev.get("duration_bucket", "")
+        bucket_label = _duration_bucket_label(bucket)
+        rows.append(
+            "<tr>"
+            f"<td>{idx}</td>"
+            f"<td><span class=\"duration-chip table-chip {bucket.replace('duration-', '')}\">{bucket_label}</span></td>"
+            f"<td>{_html_escape(_trunc(name, 56))}</td>"
+            f"<td>{_html_escape(_fmt_ns(duration_ns))}</td>"
+            f"<td>{share:.1f}%</td>"
+            "</tr>"
+        )
+    return (
+        '<section id="top-kernels">'
+        '<h3>Top slow kernels</h3>'
+        '<table>'
+        '<thead><tr><th>#</th><th>Heat</th><th>Kernel</th><th>Duration</th><th>Share</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody>'
+        '</table>'
+        '</section>'
+    )
+
+
+def _html_page(title, svg_header, svg_body, events_json, trace_stats_html, top_kernels_html, duration_legend_html):
     return f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -497,6 +733,31 @@ h2 {{ padding: 6px 12px; font-size: 16px; border-bottom: 1px solid #ddd; backgro
 #info-panel td:first-child {{ font-weight: bold; white-space: nowrap; color: #666;
                           width: 150px; background: #f0f0f0; word-break: normal; }} /* key column: fixed width, never broken mid-word */
 #info-panel .placeholder {{ color: #aaa; padding: 4px; }}                           /* placeholder text shown before any row is clicked */
+#summary, #trace-stats, #top-kernels, #duration-legend {{ margin: 0 0 12px; padding-bottom: 12px; border-bottom: 1px solid #ddd; }}
+#summary h3, #trace-stats h3, #top-kernels h3, #duration-legend h3, #detail-heading {{ font-size: 13px; margin: 0 0 6px; color: #555; }}
+#summary p {{ font-size: 12px; color: #555; line-height: 1.6; }}
+.stats-grid {{ display: grid; gap: 10px; font-size: 12px; }}
+.stat-group {{ display: grid; gap: 4px; }}
+.stat-group h4 {{ font-size: 11px; font-weight: 700; color: #555; text-transform: uppercase; letter-spacing: 0; margin: 0; }}
+.stat-row {{ display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 8px; align-items: baseline; }}
+.stat-row span {{ color: #666; }}
+.stat-row strong {{ font-weight: 600; color: #222; word-break: break-word; }}
+.stats-note {{ margin-top: 8px; font-size: 11px; line-height: 1.4; color: #777; }}
+#detail-heading {{ margin-top: 18px; padding-top: 12px; border-top: 1px solid #ddd; }}
+#info-table {{ margin-top: 8px; }}
+#top-kernels table {{ border-collapse: collapse; width: 100%; margin: 0; font-size: 12px; }}
+#top-kernels th, #top-kernels td {{ padding: 3px 6px; border: 1px solid #e8e8e8; text-align: left; vertical-align: top; }}
+#top-kernels th {{ background: #f0f0f0; color: #555; }}
+#top-kernels th:first-child, #top-kernels td:first-child {{ width: 24px; min-width: 24px; max-width: 24px; padding-left: 3px; padding-right: 3px; text-align: center; }}
+#duration-legend ul {{ list-style: none; display: grid; gap: 4px; font-size: 12px; }}
+.duration-chip {{ display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }}
+.duration-chip::before {{ content: ""; display: inline-block; width: 14px; height: 8px; border: 1px solid #8aa6c4; }}
+.duration-chip.table-chip {{ font-size: 11px; }}
+.duration-chip.base::before {{ background: #dce8f7; }}
+.duration-chip.p75::before {{ background: #b7d5f3; }}
+.duration-chip.p90::before {{ background: #f5d66d; border-color: #c59b22; }}
+.duration-chip.p97::before {{ background: #f59f45; border-color: #b86212; }}
+.duration-chip.max::before {{ background: #e35d5b; border-color: #9f2f2d; }}
 /* SVG styles */
 svg text  {{ font-family: monospace; }}
 .participant-name {{ font-size: 14px; font-weight: bold; fill: #333; }}       /* participant header labels: "Host (CPU)", "Device (GPU)" */
@@ -510,6 +771,11 @@ svg text  {{ font-family: monospace; }}
 .event-row .row-hitbox       {{ fill: transparent; }}                              /* invisible rect covering full row width — enables hover/click on empty areas */
 .event-row:hover .row-hitbox {{ fill: rgba(0, 0, 0, 0.04); }}                     /* faint dark tint on hover */
 .event-row.selected .row-hitbox   {{ fill: rgba(60, 120, 200, 0.10); }}                /* blue tint applied by selectEvent() to the selected row */
+.device-note.duration-base {{ fill: #dce8f7; stroke: #5580aa; }}
+.device-note.duration-p75 {{ fill: #b7d5f3; stroke: #4073a6; }}
+.device-note.duration-p90 {{ fill: #f5d66d; stroke: #c59b22; }}
+.device-note.duration-p97 {{ fill: #f59f45; stroke: #b86212; }}
+.device-note.duration-max {{ fill: #e35d5b; stroke: #9f2f2d; }}
 </style>
 </head>
 <body>
@@ -522,14 +788,21 @@ svg text  {{ font-family: monospace; }}
     </div>
   </div>
   <div id="info-panel">
-    <p id="legend">
-      Sequence diagram of a single <code>groupby + SUM</code> call on 100&nbsp;M rows (Nsight Systems capture).
-      Each row is one CUDA event — kernel launch, API call, or memory operation — in chronological order.
-      <b>Timeline</b>: cumulative offset from first event + delta from previous row.
-      <b>Host (CPU)</b>: solid arrows = blocking calls; dashed = async.
-      Amber boxes = sync points. Blue boxes = GPU kernels.
-      Click any row to populate the table below.
-    </p>
+        <section id="summary">
+            <h3>Summary</h3>
+            <p>
+                Sequence diagram of a single <code>groupby + SUM</code> call on 100&nbsp;M rows (Nsight Systems capture).
+                Each row is one CUDA event — kernel launch, API call, or memory operation — in chronological order.
+                <b>Timeline</b>: cumulative offset from first event + delta from previous row.
+                <b>Host (CPU)</b>: solid arrows = blocking calls; dashed = async.
+                Amber boxes = sync points. Blue boxes = GPU kernels.
+                Click any row to populate the table below.
+            </p>
+        </section>
+        {trace_stats_html}
+        {top_kernels_html}
+        {duration_legend_html}
+    <h3 id="detail-heading">Event details</h3>
     <span class="placeholder" id="info-placeholder">No event selected.</span>
   </div>
 </div>
@@ -601,6 +874,7 @@ def main():
 
     print(f"[INFO] {len(events)} visible events -> {out}", file=sys.stderr)
 
+    top_kernel_events = annotate_kernel_duration_buckets(events)
     svg_header  = build_svg_header()
     svg_body    = build_svg_body(events)
     detail_data = [{k: str(v) for k, v in ev["csv"].items()} for ev in events]
@@ -609,6 +883,9 @@ def main():
         svg_header=svg_header,
         svg_body=svg_body,
         events_json=json.dumps(detail_data, ensure_ascii=False),
+        trace_stats_html=_trace_stats_html(events, top_kernel_events),
+        top_kernels_html=_top_kernels_html(top_kernel_events),
+        duration_legend_html=_duration_legend_html(top_kernel_events),
     )
 
     with open(out, "w", encoding="utf-8") as f:
