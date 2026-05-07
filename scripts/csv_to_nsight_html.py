@@ -15,7 +15,7 @@ Click any row to see all CSV fields in the detail panel below.
 Kernel duration heatmap:
     Device kernel boxes are coloured by duration percentile within the visible
     kernel set. Muted blue boxes are the baseline group below the 75th
-    percentile; yellow/orange/red boxes identify increasingly slow kernels. A
+    percentile; amber boxes are notable kernels; red boxes are hotspots. A
     Top slow kernels table in the right panel ranks the largest contributors by
     duration.
 
@@ -148,22 +148,15 @@ def annotate_kernel_duration_buckets(events):
         return []
 
     sorted_durations = sorted(durations)
-    p50 = _percentile_threshold(sorted_durations, 50)
     p75 = _percentile_threshold(sorted_durations, 75)
-    p90 = _percentile_threshold(sorted_durations, 90)
-    p97 = _percentile_threshold(sorted_durations, 97)
-    max_duration = sorted_durations[-1]
+    p95 = _percentile_threshold(sorted_durations, 95)
 
     for ev in kernel_events:
         duration_ns = ev["duration_ns"]
-        if duration_ns == max_duration:
-            bucket = "duration-max"
-        elif duration_ns >= p97:
-            bucket = "duration-p97"
-        elif duration_ns >= p90:
-            bucket = "duration-p90"
+        if duration_ns >= p95:
+            bucket = "duration-hotspot"
         elif duration_ns >= p75:
-            bucket = "duration-p75"
+            bucket = "duration-notable"
         else:
             bucket = "duration-base"
         ev["duration_bucket"] = bucket
@@ -535,18 +528,15 @@ def build_svg_body(events):
 def _duration_threshold_ranges(kernel_events):
     durations = sorted(ev.get("duration_ns", 0) for ev in kernel_events)
     if not durations:
-        return {"max": "", "p97": "", "p90": "", "p75": "", "base": ""}
+        return {"hotspot": "", "notable": "", "base": ""}
 
     p75 = _percentile_threshold(durations, 75)
-    p90 = _percentile_threshold(durations, 90)
-    p97 = _percentile_threshold(durations, 97)
+    p95 = _percentile_threshold(durations, 95)
     max_duration = durations[-1]
     return {
-        "max": _fmt_ns(max_duration),
-        "p97": f"[{_fmt_ns(p97)}, {_fmt_ns(max_duration)}]",
-        "p90": f"[{_fmt_ns(p90)}, {_fmt_ns(p97)}]",
-        "p75": f"[{_fmt_ns(p75)}, {_fmt_ns(p90)}]",
-        "base": f"(0, {_fmt_ns(p75)}]",
+        "hotspot": f"[{_fmt_ns(p95)}, {_fmt_ns(max_duration)}]",
+        "notable": f"[{_fmt_ns(p75)}, {_fmt_ns(p95)}]",
+        "base": f"[0, {_fmt_ns(p75)}]",
     }
 
 
@@ -563,10 +553,8 @@ def _duration_legend_html(kernel_events):
         '<section id="duration-legend" aria-label="Kernel duration heatmap legend">'
         '<h3>Heatmap legend</h3>'
         '<ul>'
-        f'{label("max", "slowest", "max")}'
-        f'{label("p97", "very slow", "p97-max")}'
-        f'{label("p90", "slow", "p90-p97")}'
-        f'{label("p75", "slower", "p75-p90")}'
+        f'{label("hotspot", "hotspot", ">= p95")}'
+        f'{label("notable", "notable", "p75-p95")}'
         f'{label("base", "baseline", "< p75")}'
         '</ul>'
         '</section>'
@@ -575,10 +563,8 @@ def _duration_legend_html(kernel_events):
 
 def _duration_bucket_label(bucket):
     return {
-        "duration-max": "slowest",
-        "duration-p97": "very slow",
-        "duration-p90": "slow",
-        "duration-p75": "slower",
+        "duration-hotspot": "hotspot",
+        "duration-notable": "notable",
         "duration-base": "baseline",
     }.get(bucket, "")
 
@@ -675,7 +661,7 @@ def _trace_stats_html(events, kernel_events):
     )
 
 
-def _top_kernels_html(kernel_events, limit=5):
+def _top_kernels_html(kernel_events, limit=10):
     if not kernel_events:
         return ""
     total_ns = sum(ev.get("duration_ns", 0) for ev in kernel_events)
@@ -686,10 +672,12 @@ def _top_kernels_html(kernel_events, limit=5):
         name = ev["csv"].get("ShortName") or ev["csv"].get("Name") or ev.get("label", "")
         bucket = ev.get("duration_bucket", "")
         bucket_label = _duration_bucket_label(bucket)
+        bucket_class = bucket.replace("duration-", "")
+        bucket_title = _html_escape(bucket_label)
         rows.append(
             "<tr>"
             f"<td>{idx}</td>"
-            f"<td><span class=\"duration-chip table-chip {bucket.replace('duration-', '')}\">{bucket_label}</span></td>"
+            f"<td><span class=\"duration-chip table-chip {bucket_class}\" title=\"{bucket_title}\" aria-label=\"{bucket_title}\"></span></td>"
             f"<td>{_html_escape(_trunc(name, 56))}</td>"
             f"<td>{_html_escape(_fmt_ns(duration_ns))}</td>"
             f"<td>{share:.1f}%</td>"
@@ -749,15 +737,15 @@ h2 {{ padding: 6px 12px; font-size: 16px; border-bottom: 1px solid #ddd; backgro
 #top-kernels th, #top-kernels td {{ padding: 3px 6px; border: 1px solid #e8e8e8; text-align: left; vertical-align: top; }}
 #top-kernels th {{ background: #f0f0f0; color: #555; }}
 #top-kernels th:first-child, #top-kernels td:first-child {{ width: 24px; min-width: 24px; max-width: 24px; padding-left: 3px; padding-right: 3px; text-align: center; }}
+#top-kernels th:nth-child(2), #top-kernels td:nth-child(2) {{ width: 34px; min-width: 34px; max-width: 34px; padding-left: 3px; padding-right: 3px; text-align: center; }}
+#top-kernels td:nth-child(2) {{ vertical-align: middle; }}
 #duration-legend ul {{ list-style: none; display: grid; gap: 4px; font-size: 12px; }}
 .duration-chip {{ display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }}
 .duration-chip::before {{ content: ""; display: inline-block; width: 14px; height: 8px; border: 1px solid #8aa6c4; }}
-.duration-chip.table-chip {{ font-size: 11px; }}
-.duration-chip.base::before {{ background: #dce8f7; }}
-.duration-chip.p75::before {{ background: #b7d5f3; }}
-.duration-chip.p90::before {{ background: #f5d66d; border-color: #c59b22; }}
-.duration-chip.p97::before {{ background: #f59f45; border-color: #b86212; }}
-.duration-chip.max::before {{ background: #e35d5b; border-color: #9f2f2d; }}
+.duration-chip.table-chip {{ justify-content: center; font-size: 11px; width: 100%; }}
+.duration-chip.base::before {{ background: #dce8f7; border-color: #5580aa; }}
+.duration-chip.notable::before {{ background: #f5d66d; border-color: #c59b22; }}
+.duration-chip.hotspot::before {{ background: #e35d5b; border-color: #9f2f2d; }}
 /* SVG styles */
 svg text  {{ font-family: monospace; }}
 .participant-name {{ font-size: 14px; font-weight: bold; fill: #333; }}       /* participant header labels: "Host (CPU)", "Device (GPU)" */
@@ -772,10 +760,8 @@ svg text  {{ font-family: monospace; }}
 .event-row:hover .row-hitbox {{ fill: rgba(0, 0, 0, 0.04); }}                     /* faint dark tint on hover */
 .event-row.selected .row-hitbox   {{ fill: rgba(60, 120, 200, 0.10); }}                /* blue tint applied by selectEvent() to the selected row */
 .device-note.duration-base {{ fill: #dce8f7; stroke: #5580aa; }}
-.device-note.duration-p75 {{ fill: #b7d5f3; stroke: #4073a6; }}
-.device-note.duration-p90 {{ fill: #f5d66d; stroke: #c59b22; }}
-.device-note.duration-p97 {{ fill: #f59f45; stroke: #b86212; }}
-.device-note.duration-max {{ fill: #e35d5b; stroke: #9f2f2d; }}
+.device-note.duration-notable {{ fill: #f5d66d; stroke: #c59b22; }}
+.device-note.duration-hotspot {{ fill: #e35d5b; stroke: #9f2f2d; }}
 </style>
 </head>
 <body>

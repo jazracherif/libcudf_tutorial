@@ -39,15 +39,15 @@ h2 { padding: 6px 12px; font-size: 16px; border-bottom: 1px solid #ddd; backgrou
 #top-kernels th, #top-kernels td { padding: 3px 6px; border: 1px solid #e8e8e8; text-align: left; vertical-align: top; }
 #top-kernels th { background: #f0f0f0; color: #555; }
 #top-kernels th:first-child, #top-kernels td:first-child { width: 24px; min-width: 24px; max-width: 24px; padding-left: 3px; padding-right: 3px; text-align: center; }
+#top-kernels th:nth-child(2), #top-kernels td:nth-child(2) { width: 34px; min-width: 34px; max-width: 34px; padding-left: 3px; padding-right: 3px; text-align: center; }
+#top-kernels td:nth-child(2) { vertical-align: middle; }
 #duration-legend ul { list-style: none; display: grid; gap: 4px; font-size: 12px; }
 .duration-chip { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
 .duration-chip::before { content: ""; display: inline-block; width: 14px; height: 8px; border: 1px solid #8aa6c4; }
-.duration-chip.table-chip { font-size: 11px; }
-.duration-chip.base::before { background: #dce8f7; }
-.duration-chip.p75::before { background: #b7d5f3; }
-.duration-chip.p90::before { background: #f5d66d; border-color: #c59b22; }
-.duration-chip.p97::before { background: #f59f45; border-color: #b86212; }
-.duration-chip.max::before { background: #e35d5b; border-color: #9f2f2d; }
+.duration-chip.table-chip { justify-content: center; font-size: 11px; width: 100%; }
+.duration-chip.base::before { background: #dce8f7; border-color: #5580aa; }
+.duration-chip.notable::before { background: #f5d66d; border-color: #c59b22; }
+.duration-chip.hotspot::before { background: #e35d5b; border-color: #9f2f2d; }
 /* SVG styles */
 svg text  { font-family: monospace; }
 .participant-name { font-size: 14px; font-weight: bold; fill: #333; }       /* participant header labels: "Host (CPU)", "Device (GPU)" */
@@ -62,10 +62,8 @@ svg text  { font-family: monospace; }
 .event-row:hover .row-hitbox { fill: rgba(0, 0, 0, 0.04); }                     /* faint dark tint on hover */
 .event-row.selected .row-hitbox   { fill: rgba(60, 120, 200, 0.10); }                /* blue tint applied by selectEvent() to the selected row */
 .device-note.duration-base { fill: #dce8f7; stroke: #5580aa; }
-.device-note.duration-p75 { fill: #b7d5f3; stroke: #4073a6; }
-.device-note.duration-p90 { fill: #f5d66d; stroke: #c59b22; }
-.device-note.duration-p97 { fill: #f59f45; stroke: #b86212; }
-.device-note.duration-max { fill: #e35d5b; stroke: #9f2f2d; }
+.device-note.duration-notable { fill: #f5d66d; stroke: #c59b22; }
+.device-note.duration-hotspot { fill: #e35d5b; stroke: #9f2f2d; }
 </style>
 </head>
 <body>
@@ -144,7 +142,7 @@ svg text  { font-family: monospace; }
     <rect class="row-hitbox" x="0" y="282" width="1060" height="82"/>
     <text x="110" y="318" text-anchor="end" class="time-cumulative">27.914 ms</text>
     <text x="110" y="330" text-anchor="end" class="time-delta">+1.470 ms</text>
-    <rect x="625" y="286" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-p75"/>
+    <rect x="625" y="286" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-notable"/>
     <text x="800" y="310" text-anchor="middle" class="box-label">static_kernel (4.105 ms)</text>
     <text x="800" y="324" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;390625,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;256,1,1&gt;&gt;&gt;</text>
     <text x="800" y="337" text-anchor="middle" class="box-sublabel">regsPerThread=16</text>
@@ -247,7 +245,7 @@ svg text  { font-family: monospace; }
     <rect class="row-hitbox" x="0" y="968" width="1060" height="82"/>
     <text x="110" y="1004" text-anchor="end" class="time-cumulative">50.999 ms</text>
     <text x="110" y="1016" text-anchor="end" class="time-delta">+2.8 μs</text>
-    <rect x="625" y="972" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-p90"/>
+    <rect x="625" y="972" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-hotspot"/>
     <text x="800" y="996" text-anchor="middle" class="box-label">mapping_indices_kernel (4.784 ms)</text>
     <text x="800" y="1010" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;432,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;128,1,1&gt;&gt;&gt;</text>
     <text x="800" y="1023" text-anchor="middle" class="box-sublabel">statShmem=1984B; regsPerThread=56</text>
@@ -322,7 +320,7 @@ svg text  { font-family: monospace; }
     <rect class="row-hitbox" x="0" y="1494" width="1060" height="82"/>
     <text x="110" y="1530" text-anchor="end" class="time-cumulative">67.936 ms</text>
     <text x="110" y="1542" text-anchor="end" class="time-delta">+7.7 μs</text>
-    <rect x="625" y="1498" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-p75"/>
+    <rect x="625" y="1498" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-notable"/>
     <text x="800" y="1522" text-anchor="middle" class="box-label">DeviceSelectSweepKernel (3.439 ms)</text>
     <text x="800" y="1536" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;34723,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;384,1,1&gt;&gt;&gt;</text>
     <text x="800" y="1549" text-anchor="middle" class="box-sublabel">statShmem=23040B; regsPerThread=56</text>
@@ -508,7 +506,7 @@ svg text  { font-family: monospace; }
     <rect class="row-hitbox" x="0" y="2788" width="1060" height="82"/>
     <text x="110" y="2824" text-anchor="end" class="time-cumulative">89.774 ms</text>
     <text x="110" y="2836" text-anchor="end" class="time-delta">+9.6 μs</text>
-    <rect x="625" y="2792" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-max"/>
+    <rect x="625" y="2792" width="350" height="74" rx="2" fill="#dce8f7" stroke="#5580aa" stroke-width="1" class="note-box device-note duration-hotspot"/>
     <text x="800" y="2816" text-anchor="middle" class="box-label">single_pass_shmem_aggs_kernel (5.119 ms)</text>
     <text x="800" y="2830" text-anchor="middle" class="box-sublabel">Grid&lt;&lt;&lt;432,1,1&gt;&gt;&gt;, Block&lt;&lt;&lt;128,1,1&gt;&gt;&gt;</text>
     <text x="800" y="2843" text-anchor="middle" class="box-sublabel">dynShmem=5624B; statShmem=16B; regsPerThread=46</text>
@@ -974,8 +972,8 @@ svg text  { font-family: monospace; }
             </p>
         </section>
         <section id="trace-stats"><h3>Trace statistics</h3><div class="stats-grid"><div class="stat-group"><h4>Overall</h4><div class="stat-row"><span>Visible events</span><strong>117</strong></div><div class="stat-row"><span>GPU active time</span><strong>17.519 ms</strong></div><div class="stat-row"><span>CUDA Api</span><strong>89 / 99.484 ms</strong></div></div><div class="stat-group"><h4>Kernels</h4><div class="stat-row"><span>Kernel launches</span><strong>13 / 17.484 ms</strong></div><div class="stat-row"><span>Slowest kernel</span><strong>single_pass_shmem_aggs_kernel / 5.119 ms</strong></div></div><div class="stat-group"><h4>Memory allocation</h4><div class="stat-row"><span>Alloc requests</span><strong>23 / 2.00 GB / 57.613 ms</strong></div><div class="stat-row"><span>Free requests</span><strong>19 / 2.00 GB / 20.326 ms</strong></div></div><div class="stat-group"><h4>Memory transfers</h4><div class="stat-row"><span>Memcpy payload</span><strong>13 / 511 B / 33.7 μs</strong></div><div class="stat-row"><span>Memset payload</span><strong>2 / 8 B / 960 ns</strong></div></div></div><p class="stats-note">Allocation/free bytes come from cudaMalloc/cudaFree API records. Memcpy/memset bytes are explicit CUDA payload records only; kernel DRAM traffic is not included.</p></section>
-        <section id="top-kernels"><h3>Top slow kernels</h3><table><thead><tr><th>#</th><th>Heat</th><th>Kernel</th><th>Duration</th><th>Share</th></tr></thead><tbody><tr><td>1</td><td><span class="duration-chip table-chip max">slowest</span></td><td>single_pass_shmem_aggs_kernel</td><td>5.119 ms</td><td>29.3%</td></tr><tr><td>2</td><td><span class="duration-chip table-chip p90">slow</span></td><td>mapping_indices_kernel</td><td>4.784 ms</td><td>27.4%</td></tr><tr><td>3</td><td><span class="duration-chip table-chip p75">slower</span></td><td>static_kernel</td><td>4.105 ms</td><td>23.5%</td></tr><tr><td>4</td><td><span class="duration-chip table-chip p75">slower</span></td><td>DeviceSelectSweepKernel</td><td>3.439 ms</td><td>19.7%</td></tr><tr><td>5</td><td><span class="duration-chip table-chip base">baseline</span></td><td>DeviceScanKernel</td><td>10.5 μs</td><td>0.1%</td></tr></tbody></table></section>
-        <section id="duration-legend" aria-label="Kernel duration heatmap legend"><h3>Heatmap legend</h3><ul><li><span class="duration-chip max">slowest (max, 5.119 ms)</span></li><li><span class="duration-chip p97">very slow (p97-max, [5.119 ms, 5.119 ms])</span></li><li><span class="duration-chip p90">slow (p90-p97, [4.784 ms, 5.119 ms])</span></li><li><span class="duration-chip p75">slower (p75-p90, [3.439 ms, 4.784 ms])</span></li><li><span class="duration-chip base">baseline (&lt; p75, (0, 3.439 ms])</span></li></ul></section>
+        <section id="top-kernels"><h3>Top slow kernels</h3><table><thead><tr><th>#</th><th>Heat</th><th>Kernel</th><th>Duration</th><th>Share</th></tr></thead><tbody><tr><td>1</td><td><span class="duration-chip table-chip hotspot" title="hotspot" aria-label="hotspot"></span></td><td>single_pass_shmem_aggs_kernel</td><td>5.119 ms</td><td>29.3%</td></tr><tr><td>2</td><td><span class="duration-chip table-chip hotspot" title="hotspot" aria-label="hotspot"></span></td><td>mapping_indices_kernel</td><td>4.784 ms</td><td>27.4%</td></tr><tr><td>3</td><td><span class="duration-chip table-chip notable" title="notable" aria-label="notable"></span></td><td>static_kernel</td><td>4.105 ms</td><td>23.5%</td></tr><tr><td>4</td><td><span class="duration-chip table-chip notable" title="notable" aria-label="notable"></span></td><td>DeviceSelectSweepKernel</td><td>3.439 ms</td><td>19.7%</td></tr><tr><td>5</td><td><span class="duration-chip table-chip base" title="baseline" aria-label="baseline"></span></td><td>DeviceScanKernel</td><td>10.5 μs</td><td>0.1%</td></tr><tr><td>6</td><td><span class="duration-chip table-chip base" title="baseline" aria-label="baseline"></span></td><td>transform_kernel</td><td>5.6 μs</td><td>0.0%</td></tr><tr><td>7</td><td><span class="duration-chip table-chip base" title="baseline" aria-label="baseline"></span></td><td>static_kernel</td><td>5.0 μs</td><td>0.0%</td></tr><tr><td>8</td><td><span class="duration-chip table-chip base" title="baseline" aria-label="baseline"></span></td><td>gather_chars_fn_char_parallel</td><td>4.9 μs</td><td>0.0%</td></tr><tr><td>9</td><td><span class="duration-chip table-chip base" title="baseline" aria-label="baseline"></span></td><td>static_kernel</td><td>3.8 μs</td><td>0.0%</td></tr><tr><td>10</td><td><span class="duration-chip table-chip base" title="baseline" aria-label="baseline"></span></td><td>DeviceCompactInitKernel</td><td>2.8 μs</td><td>0.0%</td></tr></tbody></table></section>
+        <section id="duration-legend" aria-label="Kernel duration heatmap legend"><h3>Heatmap legend</h3><ul><li><span class="duration-chip hotspot">hotspot (&gt;= p95, [4.784 ms, 5.119 ms])</span></li><li><span class="duration-chip notable">notable (p75-p95, [3.439 ms, 4.784 ms])</span></li><li><span class="duration-chip base">baseline (&lt; p75, [0, 3.439 ms])</span></li></ul></section>
     <h3 id="detail-heading">Event details</h3>
     <span class="placeholder" id="info-placeholder">No event selected.</span>
   </div>
