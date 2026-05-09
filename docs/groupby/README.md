@@ -51,7 +51,7 @@ In this blog, I break down how libcudf solves these challenges.
 
 ## Scope of This Analysis
 
-This document analyses the **`groupby` + `sum` physical operator in NVIDIA's [libcudf](https://github.com/rapidsai/cudf)** — the GPU dataframe library that underpins the RAPIDS ecosystem and is used by cuDF (Python), Spark-RAPIDS, and Dask-cuDF, among others. The analysis is grounded in a **100 million row workload** (1.8 GB Parquet file) run on the DGX Spark workstation, featuring a the GB10 blackwhell with 128GB LPDDRX unified memory with host Arm Cpus
+This document analyses the **`groupby` + `sum` physical operator in NVIDIA's [libcudf](https://github.com/rapidsai/cudf)** — the GPU dataframe library that underpins the RAPIDS ecosystem and is used by cuDF (Python), Spark-RAPIDS, and Dask-cuDF, among others. The analysis is grounded in a **100 million row workload** (1.8 GB Parquet file) run on the DGX Spark workstation, featuring a the GB10 blackwhell with 128GB LPDDRX unified memory with host Arm Cpus.
 
 Specifically we trace the exact execution path triggered by the following query:
 
@@ -180,21 +180,22 @@ All measurements and call-graph annotations are grounded in a single concrete wo
 
 | # | Column | Type | Role |
 |---|--------|------|------|
-| 0 | `id` | `int32` | — |
-| 1 | `score` | `float64` | — |
-| 2 | `label` | `utf8` (string) | **groupby key** |
-| 3 | `active` | `bool` | — |
-| 4 | `amount` | `int64` | **SUM target** |
-| 5 | `ratio` | `float32` | — |
-| 6 | `timestamp` | `timestamp[ms, UTC]` | — |
-| 7 | `category` | `dictionary<int8, utf8>` | — |
+| 0 | `o_orderkey` | `int64` | unique order identifier |
+| 1 | `o_custkey` | `int64` | FK → Customer table |
+| 2 | `o_orderstatus` | `utf8` (string) | **groupby key** — `'F'` / `'O'` / `'P'` |
+| 3 | `o_totalprice` | `float64` | **SUM target** — total monetary value |
+| 4 | `o_orderdate` | `date32` | date the order was placed |
+| 5 | `o_orderpriority` | `utf8` | `'1-URGENT'` … `'5-LOW'` |
+| 6 | `o_clerk` | `utf8` | clerk who processed the order |
+| 7 | `o_shippriority` | `int32` | shipping priority (0 = normal) |
+| 8 | `o_comment` | `utf8` | free-form comment (≤79 chars) |
 
 **100 million rows**, Arrow/Parquet format, already loaded into device memory as a `cudf::table_view`.
 
 Notable properties that affect the implementation path:
-- `label` is a **variable-length UTF-8 string** column → row hashing uses MurmurHash3 over raw character bytes; key gather after aggregation requires a CUB prefix-scan over character offsets.
-- `amount` is `int64` → no type widening needed; output type stays `int64`; native `atomicAdd` is available.
-- Key cardinality is **low relative to row count** → the shared-memory aggregation sub-path is taken (≤ 128 distinct `label` values per CUDA block).
+- `o_orderstatus` is a **variable-length UTF-8 string** column → row hashing uses MurmurHash3 over raw character bytes; key gather after aggregation requires a CUB prefix-scan over character offsets.
+- `o_totalprice` is `float64` → output type stays `float64`; native `atomicAdd` is available.
+- Key cardinality is **low relative to row count** (only 3 distinct values: `'F'`, `'O'`, `'P'`) → the shared-memory aggregation sub-path is taken (≤ 128 distinct `o_orderstatus` values per CUDA block).
 
 ---
 
@@ -214,13 +215,13 @@ This analysis is split into three focused documents:
 
 **The hash path dominates for `SUM` on numeric types.** libcudf never considers the sort path when the aggregation has native atomic support (`SUM`, `MIN`, `MAX`, `COUNT`, …). The decision is made at the C++ dispatch layer before any GPU work begins.
 
-**Two kernels do the heavy lifting — and only two.** Despite a trace of thirteen distinct kernel launches, 97% of GPU time is consumed by just two: `mapping_indices_kernel` (7.0 ms, key deduplication + index mapping) and `single_pass_shmem_aggs_kernel` (5.0 ms, two-phase SUM accumulation). Everything else is bookkeeping.
+**Four kernels account for all meaningful GPU work.** Despite a trace of thirteen distinct kernel launches, four kernels together consume ~17.5 ms — essentially all GPU kernel time: `single_pass_shmem_aggs_kernel` (5.119 ms, two-phase SUM accumulation), `mapping_indices_kernel` (4.784 ms, key deduplication + index mapping), `cuco::static_set` initialisation (4.105 ms, sentinel-fill of 200M slots), and `DeviceSelectSweepKernel` (3.439 ms, unique-key stream compaction). Everything else is bookkeeping at the µs scale.
 
-**The `cuco::static_set` initialisation is the second largest cost.** Filling 200M sentinel slots to prepare the hash table takes 4.0 ms — more than the aggregation kernel itself. For workloads where the hash table can be reused across multiple aggregation calls this cost would amortise; in the single-call case it cannot.
+**The `cuco::static_set` initialisation is the third most expensive kernel.** Filling 200M sentinel slots to prepare the hash table takes 4.105 ms — behind only the aggregation and insert kernels. For workloads where the hash table can be reused across multiple aggregation calls this cost would amortise; in the single-call case it cannot.
 
 **Shared memory is the key to scalability.** Rather than having 100M threads compete on K global atomics, libcudf stages each block's contribution through a private 128-slot shared-memory accumulator. The number of global atomic writes is bounded by `num_blocks × 128`, not by the input row count — a reduction of roughly three orders of magnitude for this dataset.
 
-**`DeviceSelectSweepKernel` (unique-key extraction) is consistently under-estimated.** At 3.5 ms it is the third most expensive step, yet it fires entirely inside `cuco::static_set::retrieve_all()` — a single lib call with no visible cuDF source entry point. It is invisible to call-graph analysis and only shows up in a profiler.
+**`DeviceSelectSweepKernel` (unique-key extraction) is consistently under-estimated.** At 3.439 ms it is the fourth most expensive kernel, yet it fires entirely inside `cuco::static_set::retrieve_all()` — a single lib call with no visible cuDF source entry point. It is invisible to call-graph analysis and only shows up in a profiler.
 
 **String keys add a fixed post-aggregation cost, not a per-row cost.** The four CUB/cuDF kernels that gather and copy the output `label` strings (I–L) operate on K unique keys, not 100M rows. For low-cardinality string keys this phase costs ~20 µs regardless of input size.
 
