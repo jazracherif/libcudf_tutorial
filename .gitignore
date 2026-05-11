@@ -45,3 +45,5 @@ cufile.log
 
 # Nsight Systems profiling reports (contain env vars and system info)
 reports/
+
+scratchpad.md

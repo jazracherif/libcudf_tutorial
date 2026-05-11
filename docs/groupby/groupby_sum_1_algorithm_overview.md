@@ -1,11 +1,11 @@
-# cuDF `groupby` + `SUM` - PART I - Algorithm Overview
+# cuDF `groupby` + `Sum` - PART I - Algorithm Overview
 
 > **Part of a three-document series:**
 > - **Part I — Algorithm Overview** *(this file)*: high-level description of the hash groupby algorithm, data structures, the four-phase aggregation strategy (Kernel 0, Kernel 1, Interlude, Kernel 2), and the data flow from input rows to final output groups.
 > - [Part II — Nsight Analysis](groupby_sum_2_nsight_analysis.md): ground-truth kernel table and performance breakdown from an actual Nsight Systems capture on 100M rows.
 > - [Part III — Code Analysis](groupby_sum_3_code_analysis.md): function-by-function walk-through of the cuDF, cuCollections, RMM, and CCCL source, with annotated call stack and library layer summary.
 
-This document describes the high-level algorithm libcudf uses to compute a `groupby` + `SUM` aggregation on the GPU for the 100M-row `o_orderstatus`/`o_totalprice` dataset. It follows the data flow from path selection through key discovery, per-block shared-memory reduction, final output construction, and complexity. The lower-level index buffers and remapping steps are introduced only where they become necessary to explain the algorithm.
+This document describes the high-level algorithm libcudf uses to compute a `Broupby` + `Sum` aggregation on the GPU for the 100M-row dataset, assumed already loaded into global GPU memory as an Arrow Table. I take you through the algorithm's flow from the initialization of data structure to identifying unique groupings and aggregating the data into final output buffers. Throughput I highlights the libcudf Cuda Kernels used, how they take advatnage of the GPU's limited by very fast shared memory data structure and block synchronization to ensure threads remain in lockstep to achive the objective. I also highlight describe some of the other libraries libcudf relies on, such as cuCollection for the static sets and hashmaps , low and the thrust library for lower level data parallel algorithms like scatter and for_each from. The aggregation key assumed here is low (4), making the faster path possible.
 
 ---
 
@@ -21,9 +21,14 @@ This document describes the high-level algorithm libcudf uses to compute a `grou
   - [Kernel 1 — Key insertion and index mapping](#kernel-1--key-insertion-and-index-mapping-mapping_indices_kernel)
   - [Interlude — Dense output index remapping](#interlude--dense-output-index-remapping)
   - [Kernel 2 — Shared-memory accumulation + flush](#kernel-2--shared-memory-accumulation--flush-single_pass_shmem_aggs_kernel)
-  - [When the fast path is not taken](#when-the-fast-path-is-not-taken)
   - [Output Key Gather](#output-key-gather)
 - [5. Step-By-Step illustration of the algorithm: from input rows to final output indices](#5-step-by-step-illustration-of-the-algorithm-from-input-rows-to-final-output-indices)
+  - [Step 1 — Input partitioning](#step-1--input-partitioning)
+  - [Step 2 — Kernel 1: block-local rank assignment + global set insertion](#step-2--kernel-1-block-local-rank-assignment--global-set-insertion-compute_mapping_indices)
+  - [Step 3 — `extract_populated_keys()`: compact `global_set` → `unique_key_indices`](#step-3--extract_populated_keys-compact-global_set--unique_key_indices)
+  - [Step 4 — `compute_key_transform_map()`: invert `unique_key_indices` via `thrust::scatter`](#step-4--compute_key_transform_map-invert-unique_key_indices-via-thrustscatter)
+  - [Step 5 — `thrust::for_each_n`: rewrite `global_mapping_indices` in-place with dense output rows](#step-5--thrustfor_each_n-rewrite-global_mapping_indices-in-place-with-dense-output-rows)
+  - [Step 6 — Kernel 2: accumulate + flush](#step-6--kernel-2-accumulate--flush-compute_shared_memory_aggs)
 - [6. Full Data Flow Diagram](#6-full-data-flow-diagram)
 - [7. Algorithm Complexity Summary](#7-algorithm-complexity-summary)
 
@@ -57,37 +62,60 @@ FROM     orders
 GROUP BY o_orderstatus;
 ```
 
-The kernel sequence:
+The key idea behind the fast path is that each CUDA block first deduplicates the keys among the rows it processes, then those per-block results are connected to the final global output groups. This is the concept of a **block-local rank**.
 
-1. **Kernel 0 (hash set init)** — Before any row is processed, a `cub::detail::for_each` kernel writes the SENTINEL value to all 200M slots of `global_set`, establishing the "empty" state that all subsequent CAS insertions depend on.
+> **What is a block-local rank?**  
+> - Each CUDA block assigns a small integer, starting from 0, to each distinct `o_orderstatus` value the first time it is encountered among that block's assigned rows. That integer is the **block-local rank**: a dense index into the block's private shared-memory accumulator array. In the fast path, valid ranks are `0..127`. This numbering is **private to this block**; another block may assign rank 0 to "O" or any other `o_orderstatus`.
+> - The Interlude phase converts the representative row-indices stored in `global_mapping_indices` after Kernel 1 into final dense global output indices (`0..K-1`), where K is the total number of unique keys across all rows. This ensures that all blocks agree on the same output slot for each group before Kernel 2 runs.
 
-2. **Kernel 1 (membership)** — Before any SUM arithmetic, determines which `o_orderstatus` group every input row belongs to. Each CUDA block uses a private shared-memory hash table to compact its rows down to at most 128 distinct keys, assigning each a block-local rank. For each new key, it inserts into `global_set` via CAS, atomically electing a single representative row per key across all blocks. Two index arrays, `local_mapping_indices` (block-local rank per row) and `global_mapping_indices` (representative row-index per block-rank slot), are written for use in the Interlude and Kernel 2.
 
-3. **Interlude (index remapping, between kernels)** — Between the two main kernels, a set of device operations scans `global_set` (via `retrieve_all` / `cub::DeviceSelect::If`) to collect the K representative row-indices, then builds a dense output ordering (0..K-1) via `thrust::scatter`, and rewrites `global_mapping_indices` in-place via `thrust::for_each_n` so every block agrees on the same output slot for each group.
+Algorithm break down:
 
-4. **Kernel 2 (reduction)** — Now that membership and output ordering are known, each block accumulates its assigned `o_totalprice` values entirely within shared memory (no cross-block, no global atomics yet). Each block then flushes only up to 128 partial `o_totalprice` sums to the correct output slot using the remapped `global_mapping_indices` — one atomic-add per distinct `o_orderstatus` value per block rather than one per row. For this dataset the number of global atomics is reduced by a factor of roughly `100M / (num_blocks × avg_labels_per_block)` compared to the naïve approach.
+1. **Initialization** — Before any row is processed, the `global_set` hash set is initialized to size 2x the input (200M slots) with a SENTINEL value (via `cub::detail::for_each` )
+
+2. **Block Level Membership and Index Mapping** — The next phase phase reads the key column and determines which `o_orderstatus` group every input row belongs to. Each CUDA block uses a private shared-memory hash table to map its rows to at most 128 distinct keys, assigning each a block-local rank. For each new key, it atomically elects via CAS a single representative row per key across all blocks and inserts into `global_set`. Two index arrays, the `local_mapping_indices` (block-local rank value allocated to each row) and `global_mapping_indices` (stores the row-index of the winniw row for each rank slot), are written for use in the Interlude and Kernel 2.
+
+3. **Interlude: Dense Output Index Remapping** — Between the two main kernels, a set of device operations scans `global_set` (via `retrieve_all` / `cub::DeviceSelect::If`) to collect the K representative row-indices, then builds a dense output ordering (0..K-1) via `thrust::scatter`, and rewrites `global_mapping_indices` in-place via `thrust::for_each_n` so every block agrees on the same output slot for each group.
+
+4. **Shared-Memory Accumulation + Global Reducation** — Now that membership and output ordering are known, each block accumulates its assigned `o_totalprice` values entirely within shared memory (no cross-block, no global atomics yet). Each block then flushes only up to 128 partial `o_totalprice` sums to the correct output slot using the remapped `global_mapping_indices` — one atomic-add per distinct `o_orderstatus` value per block rather than one per row. For this dataset the number of global atomics is reduced by a factor of roughly `100M / (num_blocks × avg_labels_per_block)` compared to the naïve approach.
 
 Kernel 1 and Kernel 2 communicate through the index arrays produced by Kernel 1 and rewritten by the Interlude; no inter-block GPU synchronisation is needed between Kernel 1 and Kernel 2.
 
-> **What is a block-local rank?**  
-> - Each CUDA block assigns a small integer (starting from 0) to each distinct `o_orderstatus` value the first time it is encountered within that block's slice of rows. That integer is the **block-local rank** — a dense index into the block's private shared-memory accumulator array.  
-> - The numbering is **private to this block** — another block may assign rank 0 to "O" or any other `o_orderstatus`. `global_mapping_indices` is what maps each block's local ranks to the single shared `total_price[0..K-1]` output array.  
-> - The Interlude's job is precisely to convert the raw winning row-indices stored in `global_mapping_indices` after Kernel 1 into the final dense global output indices (0..K-1), so that all blocks agree on the same output slot for each group before Kernel 2 runs.
 
 Summary flow:
 ```
-Kernel 0: writes SENTINEL to all 200M global_set slots
-
-Kernel 1 output:
-  local_mapping_indices[row]          → block-local o_orderstatus-group rank within this block (0..127)
-  global_mapping_indices[blk×128+r]   → representative row-index of the key (winning CAS row)
-
-Interlude rewrites global_mapping_indices in-place:
-  global_mapping_indices[blk×128+r]   → dense output index in total_price[0..K-1]
-
-Kernel 2 uses these to:
-  shmem_price_accum[local_rank] += o_totalprice[row]          (for all 100M rows, in shared memory)
-  total_price[global_label_idx]   += shmem_price_accum[local_rank]  (at most 128 flushes per block)
+┌─--------------------------------------------------------------┐
+| Kernel 0 - Hash Set Initialization                            |
++---------------------------------------------------------------+
+| global_set[0..200M) <- SENTINEL                               |
+└---------------------------------------------------------------+
+                              |
+                              v
+┌─--------------------------------------------------------------┐
+| Kernel 1 - Membership + Index Mapping                         |
++---------------------------------------------------------------+
+| local_mapping_indices[row]        -> the block-local rank assigned to row  |
+| global_mapping_indices[blk*128+r] -> The representative row index for each rank slot in each block   |
+| global_set insert/find(rep_row)   -> The winning representation row at the key hash slot  |
+└--------------------------------------------------------------+
+                              |
+                              v
+┌─--------------------------------------------------------------┐
+| Interlude - Dense Output Index Remapping                      |
++---------------------------------------------------------------+
+| global_mapping_indices[blk*128+r] -> dense output index       |
+|                                      in total_price[0..K-1]   |
+└---------------------------------------------------------------+
+                              |
+                              v
+┌─--------------------------------------------------------------┐
+| Kernel 2 - Shared-Memory Accumulation + Global Reduction      |
++---------------------------------------------------------------+
+| r = local_mapping_indices[row]                                |
+| shmem_price_accum[r] += o_totalprice[row]                     |
+| global_label_idx = global_mapping_indices[blk*128+r]          |
+| total_price[global_label_idx] += shmem_price_accum[r]         |
+└--------------------------------------------------------------+
 ```
 
 ---
@@ -96,13 +124,12 @@ Kernel 2 uses these to:
 
 Before walking the kernels in implementation order, it helps to isolate the data structure that makes the rest of the algorithm possible.
 
-The hash groupby is built around a **device-side open-addressing hash set** (`cuco::static_set`) — referred to as `global_set` in the code — that stores one representative input row-index per unique key. It is shared across all CUDA blocks and is the single source of truth for which keys have been seen globally. Dense output identifiers are derived later by scanning this set and remapping those representative row-indices during the Interlude.
-- **Kernel 0** initializes it by writing SENTINEL to every slot;
-- **Kernel 1** writes winning row-indices into it via CAS;
-- the remapping steps between Kernel 1 and Kernel 2 then scan it to build the final output index map.
+The hash groupby is built around a **device-side open-addressing hash set** (`cuco::static_set`), referred to as `global_set` in the code, that stores one representative input row-index per unique key. It does not store the aggregation key values directly; instead, each stored row-index points back into the original key column, and the row hasher/comparator use that row to hash and compare the key value. Since many rows can have the same aggregation key, `insert_and_find()` uses CAS (compare-and-swap) to claim empty global slots and elect one representative row for each key across all blocks. Each block first maintains its own block-private `shared_set` in shared memory to deduplicate rows locally, then only the block-local representative rows are inserted/looked up in `global_set`. Multiple blocks may attempt to register the same key, but only the first successful CAS writes that key's global representative row-index into the set. 
+
+In order to minimize collision cost, the set's capacity is set to double the number of unique keys in the worst case, thus twice the number of rows in the dataset.
 
 ```
-global_set slot layout (capacity = 2 × num_input_rows = 200M slots for N = 100M rows, load factor ≤ 50%):
+`global_set` slot layout (capacity = 2 × num_input_rows = 200M slots for N = 100M rows, load factor = 50%):
 
  index:  [ 0 ][ 1 ][ 2 ][ 3 ] ... [ 199,999,999 ]
  value:  [EMPTY][EMPTY][ 7 ][EMPTY]... [12] ...   ← row-indices into `o_orderstatus` column of input table
@@ -112,7 +139,7 @@ global_set slot layout (capacity = 2 × num_input_rows = 200M slots for N = 100M
 
 ### Set design
 
-This is a hash set constructed in [`compute_groupby()`](../../cudf/cpp/src/groupby/hash/compute_groupby.cu#L126) with the following specifications:
+The hash set is constructed in [`compute_groupby()`](../../cudf/cpp/src/groupby/hash/compute_groupby.cu#L126) with the following specifications:
 
 | Property | Value | Notes |
 |----------|-------|-------|
@@ -169,7 +196,7 @@ Before any row is processed, a `cub::detail::for_each` kernel sweeps all 200M sl
 
 Every input row is processed by this kernel. For each row, the thread performs three steps:
 
-1. **Block-local deduplication** — [`find_local_mapping()`](../../cudf/cpp/src/groupby/hash/compute_mapping_indices.cuh#L25) inserts the row's key into [`shared_set`](../../cudf/cpp/src/groupby/hash/compute_mapping_indices.cuh#L140), a block-private mini hash table [`cuco::static_set_ref`](../../cuCollections/include/cuco/static_set_ref.cuh) backed by `__shared__ slots[]` (capacity = [`GROUPBY_CARDINALITY_THRESHOLD = 128`](../../cudf/cpp/src/groupby/hash/helpers.cuh#L29) unique keys). `shared_set` is used only for existence checks (new key vs. duplicate); a separate flat `__shared__` array `shared_set_indices[rank] = row_idx` maps each block-local rank to the first input row that claimed it. `local_mapping_indices[row]` is written with the block-local group rank (0..127): for a new key it is assigned by atomically incrementing `cardinality`; for a duplicate it is copied from `local_mapping_indices[matched_row]` after a `block.sync()`.
+1. **Block-local deduplication** — [`find_local_mapping()`](../../cudf/cpp/src/groupby/hash/compute_mapping_indices.cuh#L25) inserts the row's key into [`shared_set`](../../cudf/cpp/src/groupby/hash/compute_mapping_indices.cuh#L140), a block-private mini hash table [`cuco::static_set_ref`](../../cuCollections/include/cuco/static_set_ref.cuh) backed by `__shared__ slots[]` (capacity = [`GROUPBY_CARDINALITY_THRESHOLD = 128`](../../cudf/cpp/src/groupby/hash/helpers.cuh#L29) unique keys). `shared_set` is used only for existence checks (new key vs. duplicate); a separate flat `__shared__` array `shared_set_indices[rank] = row_idx` maps each block-local rank to the first input row that claimed it. `local_mapping_indices[row]` is written with the block-local group rank (0..127): for a new key it is assigned by atomically incrementing `cardinality`; for a duplicate it is copied from `local_mapping_indices[matched_row]` after a `block.sync()`. `local_mapping_indices` provides a local per block grouping of the rows that will be re-used in phase 1 of the later accumulation step.
 
 2. **Global key registration** — [`find_global_mapping()`](../../cudf/cpp/src/groupby/hash/compute_mapping_indices.cuh#L69) iterates over `shared_set_indices[0..cardinality-1]` and inserts each representative row-index into the **global** `cuco::static_set`. The CAS inside `global_set.insert_and_find()` atomically elects a single **representative row** for that key across all blocks. The winning row-index is stored in `global_mapping_indices[block × 128 + rank]`. **Only one global insertion** is made per distinct `o_orderstatus` value *per block*, not per row.
 
@@ -178,61 +205,53 @@ Every input row is processed by this kernel. For each row, the thread performs t
 
 ### Interlude — Dense output index remapping
 
-After the kernel, a host-side `cudaMemcpy DtoH` reads the fallback flag to decide which path to take next. When there is no overflow, a host-side call to `cuco::static_set::retrieve_all()` extracts the populated slot indices (unique key row-indices) into a contiguous buffer, firing two CUB kernels (`DeviceCompactInitKernel` + `DeviceSelectSweepKernel`).
+When there is no overflow, [`extract_populated_keys()`](../../cudf/cpp/src/groupby/hash/compute_single_pass_aggs.cuh#L151) is invoked to extract unique key row-indices from `global_set` into a contiguous buffer via `cuco::static_set::retrieve_all()`, which fires two CUB kernels (`DeviceCompactInitKernel` + `DeviceSelectSweepKernel`).
 
 The key transition in this phase is the meaning of `global_mapping_indices`:
 
 ```
-Before Interlude: global_mapping_indices[blk×128+r] → representative input row-index
-After Interlude:  global_mapping_indices[blk×128+r] → dense output index in total_price[0..K-1]
+Before Interlude: global_mapping_indices[blk×128+r] → block rank maps to representative input row-index[0..N-1]
+After Interlude:  global_mapping_indices[blk×128+r] → block rank maps to dense output index in total_price[0..K-1]
 ```
 
-```
-After mapping_indices_kernel:
+This is done in 2 steps:
 
- local_mapping_indices[row]         → block-local rank  (0..127)
- global_mapping_indices[blk×128+r]  → representative input row-index
- unique_key_indices[0..K-1]         → row-indices of the K distinct keys (from retrieve_all)
-```
-
-A [`compute_key_transform_map()`](../../cudf/cpp/src/groupby/hash/output_utils.cu#L157) step then builds a dense renumbering (`key_transform_map`) that maps any representative input row-index to a compact output slot [0, K):
+1) A [`compute_key_transform_map()`](../../cudf/cpp/src/groupby/hash/compute_single_pass_aggs.cuh#L156) step builds the dense renumbering (`key_transform_map`) that maps any representative input row-index to a compact output slot [0, K):
 
 ```
 key_transform_map[representative_input_row_idx] = output_group_index   (0..K-1)
 ```
 
-A second `thrust::for_each_n` kernel then rewrites `global_mapping_indices` through this map so every entry holds a finalized output group index.
+2) A second [`thrust::for_each_n`](../../cudf/cpp/src/groupby/hash/compute_single_pass_aggs.cuh#L160) kernel then rewrites `global_mapping_indices` through this map so every entry holds a finalized output group index.
 
 ### Kernel 2 — Shared-memory accumulation + flush ([`single_pass_shmem_aggs_kernel`](../../cudf/cpp/src/groupby/hash/compute_shared_memory_aggs.cu#L207))
 
-Each block allocates a **shmem aggregation buffer** sized `num_agg_columns ×` [`GROUPBY_CARDINALITY_THRESHOLD`](../../cudf/cpp/src/groupby/hash/helpers.cuh#L29) `× sizeof(Target)`.
+Each block declares [`extern __shared__ cuda::std::byte shmem_agg_storage[]`](../../cudf/cpp/src/groupby/hash/compute_shared_memory_aggs.cu#L232) — a dynamically-sized shared memory buffer laid out by [`calculate_columns_to_aggregate()`](../../cudf/cpp/src/groupby/hash/compute_shared_memory_aggs.cu#L33) as `num_agg_columns × cardinality × sizeof(element_type)` bytes (plus alignment padding), where `cardinality ≤ GROUPBY_CARDINALITY_THRESHOLD = 128`.
 
-The kernel runs in two sub-phases:
+for each aggregation output column, the kernel runs the following two sub-phases:
 
 ```
 ┌─ Sub-phase 1: per-row accumulation into shared memory ──────────────────────┐
-│  For each row assigned to this block:                                        │
-│    shmem_agg_storage[local_mapping_indices[row]] += source_value[row]        │
-│    (via cudf::detail::atomic_add into shared memory)                         │
+│  For each `row` assigned to a block, use previously generated               |
+| `local_mapping_indices` to aggregated rows with same key in each block:     │
+│    shmem_agg_storage[local_mapping_indices[row]] += source_value[row]       │
+│    (via cudf::detail::atomic_add into shared memory)                        │
 └─────────────────────────────────────────────────────────────────────────────┘
-                          __syncthreads()
+                              |
+                          block.sync()
+                              |
 ┌─ Sub-phase 2: flush partial results to global output columns ───────────────┐
-│  For each unique key resident in this block:                                 │
+│  For each `unique key` resident in this block:                              │
 │    target_global_col[global_mapping_indices[blk×128+rank]]                  │
-│        += shmem_agg_storage[rank]                                            │
-│    (via cudf::detail::atomic_add into global memory)                         │
+│        += shmem_agg_storage[rank]                                           │
+│    (via cudf::detail::atomic_add into global memory)                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Multiple blocks may map to the same output group index — the global `atomic_add` resolves all collisions correctly.
+`target_global_col` will contain the final aggregation value for each column. 
 
-For `SUM` on `float64` / `double` input (`o_totalprice`) → the output type is also `float64` / `double` — no type widening is required, implemented through [`update_target_element<T, SUM>`](../../cudf/cpp/include/cudf/detail/aggregation/device_aggregators.cuh#L116).
+The global `atomic_add` in sub-phase 2 is reached via an inlined two-level compile-time template dispatch (`type_dispatcher` × `aggregation_dispatcher`) that resolves the runtime column type and aggregation kind to a single pre-compiled specialization with no GPU branching. For `SUM` on `double` input (`o_totalprice`), this lands at [`update_target_element_gmem<double, SUM>`](../../cudf/cpp/src/groupby/hash/global_memory_aggregator.cuh#L68), which calls [`cudf::detail::atomic_add`](../../cudf/cpp/src/groupby/hash/global_memory_aggregator.cuh#L79) directly.
 
-### When the fast path is not taken
-
-> **Performance cliff:** more than 128 unique groupby keys per block
-
-If any CUDA block encounters more than 128 distinct `o_orderstatus` values within its assigned rows (high-cardinality data or adversarial partitioning), it sets the [`needs_global_memory_fallback`](../../cudf/cpp/src/groupby/hash/compute_mapping_indices.cuh#L164) flag and the algorithm switches to the **global memory path** ([`compute_global_memory_aggs`](../../cudf/cpp/src/groupby/hash/compute_global_memory_aggs.cuh#L162)). In that path, every row inserts or finds its key in the global hash set and atomically accumulates directly into the output column. This removes the per-block cardinality limit, but gives up the shared-memory buffering that keeps the fast path cheap.
 
 ### Output Key Gather
 
@@ -248,7 +267,7 @@ For string key columns this gather requires a multi-step CUB prefix scan over ch
 
 ## 5. Step-By-Step illustration of the algorithm: from input rows to final output indices
 
-The example below traces the same index transformation with two small blocks. The values are artificial, but the roles of `local_mapping_indices`, `global_mapping_indices`, `unique_key_indices`, and `key_transform_map` match the real execution.
+The example below traces the whole algorithm with two small blocks. The values are artificial, but the roles of `local_mapping_indices`, `global_mapping_indices`, `unique_key_indices`, and `key_transform_map` match the real execution.
 
 **Setup**: 
 - 2 blocks (B0, B1), 
@@ -263,25 +282,25 @@ The example below traces the same index transformation with two small blocks. Th
 
 Each block is assigned a contiguous slice of the 100M input rows:
 
-```
-Block0 processes rows 1000..1004:
-    Row     Key
-    ---     ---
-    1000    "F"
-    1001    "O"
-    1002    "F"
-    1003    "P"
-    1004    "O"
+**Block0** (rows 1000..1004):
 
-Block1 processes rows 5000..5004:
-    Row     Key
-    ---     ---
-    5000    "O"
-    5001    "P"
-    5002    "O"
-    5003    "F"
-    5004    "P"
-```
+| Row  | Key |
+|------|-----|
+| 1000 | "F" |
+| 1001 | "O" |
+| 1002 | "F" |
+| 1003 | "P" |
+| 1004 | "O" |
+
+**Block1** (rows 5000..5004):
+
+| Row  | Key |
+|------|-----|
+| 5000 | "O" |
+| 5001 | "P" |
+| 5002 | "O" |
+| 5003 | "F" |
+| 5004 | "P" |
 
 ### Step 2 — Kernel 1: block-local rank assignment + global set insertion ([`compute_mapping_indices`](../../cudf/cpp/src/groupby/hash/compute_mapping_indices.cuh))
 
@@ -296,27 +315,43 @@ Assume Block0 wins the global CAS races, and each block assigns local ranks in f
 - Block0 first sees "F", then "O", then "P" → F=rank0, O=rank1, P=rank2
 - Block1 first sees "O", then "P", then "F" → O=rank0, P=rank1, F=rank2
 
-```
-rows 1000..1004 → [0, 1, 0, 2, 1]   (Block0: F=rank0, O=rank1, P=rank2)
-rows 5000..5004 → [0, 1, 0, 2, 1]   (Block1: O=rank0, P=rank1, F=rank2)
+**`local_mapping_indices`** — block-local rank per row:
 
-`global_set` after Kernel 1 (200M slots, only 3 slots occupied):
-  slot hash("F")%200M = row 1000   ← first winning row with "F"
-  slot hash("O")%200M = row 1001   ← first winning row with "O"
-  slot hash("P")%200M = row 1003   ← first winning row with "P"
-  (all other 199,999,997 slots) = SENTINEL
+| Row | Value | Description |
+|-----|------------------------------|-------------|
+| 1000 | 0 | Block0: "F" → rank 0 (first seen) |
+| 1001 | 1 | Block0: "O" → rank 1 |
+| 1002 | 0 | Block0: "F" duplicate → rank 0 |
+| 1003 | 2 | Block0: "P" → rank 2 |
+| 1004 | 1 | Block0: "O" duplicate → rank 1 |
+| ... | | 
+| 5000 | 0 | Block1: "O" → rank 0 (first seen) |
+| 5001 | 1 | Block1: "P" → rank 1 |
+| 5002 | 0 | Block1: "O" duplicate → rank 0 |
+| 5003 | 2 | Block1: "F" → rank 2 |
+| 5004 | 1 | Block1: "P" duplicate → rank 1 |
 
-`global_mapping_indices` after Kernel 1 (representative input row indices, NOT dense output rows yet):
-  since B0 won the CAS races, B0's first row for each key is stored in `global_set`
-  Block0  [0*128 + 0] = 1000   ← B0 rank 0 ("F") → winning row 1000
-          [0*128 + 1] = 1001   ← B0 rank 1 ("O") → winning row 1001
-          [0*128 + 2] = 1003   ← B0 rank 2 ("P") → winning row 1003
-          [0*128 + 3..127] = SENTINEL
-  Block1  [1*128 + 0] = 1001   ← B1 rank 0 ("O") → uses Block0 winning row 1001
-          [1*128 + 1] = 1003   ← B1 rank 1 ("P") → uses Block0 winning row 1003
-          [1*128 + 2] = 1000   ← B1 rank 2 ("F") → uses Block0 winning row 1000
-          [1*128 + 3..127] = SENTINEL
-```
+**`global_set`** after Kernel 1 (200M slots, only 3 occupied), stores the winning representative row for this key
+
+| Slot | Value | Description |
+|------|--------------|-------------|
+| `hash("F") % 200M` | 1000 | First winning row with key "F" |
+| `hash("O") % 200M` | 1001 | First winning row with key "O" |
+| `hash("P") % 200M` | 1003 | First winning row with key "P" |
+| all other 199,999,997 slots | SENTINEL | Empty |
+
+**`global_mapping_indices`** after Kernel 1 (representative input row indices, NOT dense output indices yet). Since B0 won the CAS races, B0's first row for each key is what gets stored:
+
+| Index | Value | Description |
+|-------|--------------|-------------|
+| `[0×128 + 0]` | 1000 | B0 rank 0 ("F") → winning row 1000 |
+| `[0×128 + 1]` | 1001 | B0 rank 1 ("O") → winning row 1001 |
+| `[0×128 + 2]` | 1003 | B0 rank 2 ("P") → winning row 1003 |
+| `[0×128 + 3..127]` | SENTINEL | Unused B0 slots |
+| `[1×128 + 0]` | 1001 | B1 rank 0 ("O") → uses B0 winning row 1001 |
+| `[1×128 + 1]` | 1003 | B1 rank 1 ("P") → uses B0 winning row 1003 |
+| `[1×128 + 2]` | 1000 | B1 rank 2 ("F") → uses B0 winning row 1000 |
+| `[1×128 + 3..127]` | SENTINEL | Unused B1 slots |
 
 Note: B1 also attempted to insert "O", "P", and "F" but the CAS returned `DUPLICATE`. The iterator still points to the existing slot, so `*it` gives the same row index B0 stored. Both blocks therefore agree on the same representative input row index per key.
 
@@ -336,28 +371,32 @@ These are the same row indices already in `global_mapping_indices`, just dedupli
 
 ### Step 4 — [`compute_key_transform_map()`](../../cudf/cpp/src/groupby/hash/compute_single_pass_aggs.cuh#L155): invert `unique_key_indices` via `thrust::scatter`
 
-Scatters counting values `0, 1, 2` to positions `unique_key_indices[0,1,2]`. The result is an array of size the input number of rows, where each populated entry maps a representative input row index to its final dense output row.
+Scatters counting values `0, 1, 2` to positions `unique_key_indices[0,1,2]`. The result is an array of size N (number of input rows), where each populated index is the representative input row index mapped to its final dense output row.
 
-```
-key_transform_map[1000] = 0   ← row 1000 ("F") → dense output row 0
-key_transform_map[1001] = 1   ← row 1001 ("O") → dense output row 1
-key_transform_map[1003] = 2   ← row 1003 ("P") → dense output row 2
-(all other entries of the 100M-entry map are uninitialized / irrelevant)
-```
+| Index | Value | Description |
+|-------|-------|-------------|
+| `[1000]` | 0 | Row 1000 ("F") → dense output row 0 |
+| `[1001]` | 1 | Row 1001 ("O") → dense output row 1 |
+| `[1002]` | - | - |
+| `[1003]` | 2 | Row 1003 ("P") → dense output row 2 |
+| all other 99,999,997 entries | (uninitialized) | Irrelevant — never read |
 
 ### Step 5 — [`thrust::for_each_n`](../../cudf/cpp/src/groupby/hash/compute_single_pass_aggs.cuh#L157): rewrite `global_mapping_indices` in-place with dense output rows
 
 Each non-SENTINEL entry (a representative input row index in 0..N-1) is replaced with `key_transform_map[old_idx]` (the corresponding dense output row in 0..K-1). The representative rows 1000, 1001, and 1003 are not usable as output indices directly; there are only K=3 output rows, so they must be remapped to 0, 1, and 2:
 
-```
-`global_mapping_indices` after remapping:
-  [0*128 + 0]: row 1000 → key_transform_map[1000] = 0   ("F" → output row 0)
-  [0*128 + 1]: row 1001 → key_transform_map[1001] = 1   ("O" → output row 1)
-  [0*128 + 2]: row 1003 → key_transform_map[1003] = 2   ("P" → output row 2)
-  [1*128 + 0]: row 1001 → key_transform_map[1001] = 1   ("O" → output row 1)
-  [1*128 + 1]: row 1003 → key_transform_map[1003] = 2   ("P" → output row 2)
-  [1*128 + 2]: row 1000 → key_transform_map[1000] = 0   ("F" → output row 0)
-```
+**`global_mapping_indices`** after remapping (dense output indices, replacing representative row indices): The block ranks now have a global mapping
+
+| Index | Value | Description |
+|-------|-------|-------------|
+| `[0×128 + 0]` | 0 | B0 rank 0 ("F") → output row 0 |
+| `[0×128 + 1]` | 1 | B0 rank 1 ("O") → output row 1 |
+| `[0×128 + 2]` | 2 | B0 rank 2 ("P") → output row 2 |
+| `[0×128 + 3..127]` | SENTINEL | Unused B0 slots |
+| `[1×128 + 0]` | 1 | B1 rank 0 ("O") → output row 1 |
+| `[1×128 + 1]` | 2 | B1 rank 1 ("P") → output row 2 |
+| `[1×128 + 2]` | 0 | B1 rank 2 ("F") → output row 0 |
+| `[1×128 + 3..127]` | SENTINEL | Unused B1 slots |
 
 ### Step 6 — Kernel 2: accumulate + flush ([`compute_shared_memory_aggs`](../../cudf/cpp/src/groupby/hash/compute_shared_memory_aggs.cu))
 
@@ -380,14 +419,16 @@ The key insight is where the arrows go:
 
 ## 7. Algorithm Complexity Summary
 
+N = total number of input rows (100M in this dataset), K = number of distinct groupby keys, capacity = hash-table size (2N slots = 200M).
+
 | Stage | Time complexity | Dominant cost |
 |-------|----------------|---------------|
 | Kernel 0: hash set init | O(N) | Memory bandwidth — write sentinel to 2N slots (~4.1 ms) |
 | Kernel 1: key insertion + local mapping | O(N) avg | Hash probing + atomic inserts |
-| Interlude: unique key extraction + dense index remap | O(capacity) | Stream compaction over all 2N slots + two lightweight Thrust kernels |
+| Interlude: unique key extraction + dense index remap | O(capacity), **not** O(K) | `retrieve_all` must scan every one of the 200M hash-table slots to find the K occupied ones — cost is fixed by table size, not by the number of distinct keys (~3.4 ms even when K=3) |
 | Kernel 2: SUM accumulation | O(N) | Shared-memory atomics (fast) + global atomics (flush) |
 | Key gather | O(K + total key bytes) for strings | Offset scan + character copy |
 
 Total: **O(N)** average with low constant factors when cardinality ≤ 128 groups per block. The asymptotic result is simple; the practical win comes from changing global atomic frequency from per-row to per-block-per-group.
 
-> **This dataset**: N = 100M rows, K = number of distinct `o_orderstatus` values. The Nsight capture confirms ~19.6 ms total kernel time at this scale, with the 800 MB `cuco::static_set` storage (200M × 4-byte slots) being the dominant memory footprint.
+> **This dataset**: N = 100M rows, K = 4 distinct `o_orderstatus` values. The Nsight capture confirms ~19.6 ms total kernel time at this scale, with the 800 MB `cuco::static_set` storage (200M × 4-byte slots) being the dominant memory footprint.
